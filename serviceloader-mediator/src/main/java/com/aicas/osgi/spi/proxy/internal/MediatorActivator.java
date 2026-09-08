@@ -6,23 +6,18 @@
 package com.aicas.osgi.spi.proxy.internal;
 
 import java.lang.reflect.Proxy;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
+
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleActivator;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 import org.osgi.framework.ServiceRegistration;
 import org.osgi.framework.hooks.weaving.WeavingHook;
+import org.osgi.framework.wiring.BundleCapability;
 import org.osgi.service.log.Logger;
 import org.osgi.service.log.LoggerFactory;
 import org.osgi.util.tracker.BundleTracker;
@@ -31,92 +26,19 @@ import org.osgi.util.tracker.ServiceTrackerCustomizer;
 
 public class MediatorActivator implements BundleActivator
 {
+  /*--------------------------- constants -----------------------------*/
+  private static final int CONSUMER_TRACKED_STATES = Bundle.RESOLVED |
+                                                     Bundle.STARTING |
+                                                     Bundle.ACTIVE;
 
-  /**
-   * Stores the currently registered Service Provider implementations for one
-   * Service Type.
-   *
-   * <p>The object is shared with {@code ServiceLoader} instances. Provider
-   * registrations can only be modified through {@link #putProviders(long, Set)}
-   * and {@link #removeProviderBundle(long)}. The Provider map exposed to callers is
-   * read-only.</p>
-   *
-   * <p>The generation is incremented whenever a Provider bundle for this
-   * Service Type is registered, removed, updated, or begins stopping. This
-   * lets mediated ServiceLoader instances invalidate only cached objects for
-   * the affected Service Type.</p>
-   */
-  private static final class RegisteredServiceType
-  {
-    private final Map<Long, List<String>> providersByBundle_ = new HashMap<>();
-    private final AtomicLong generation_ = new AtomicLong();
+  private static final int PROVIDER_TRACKED_STATES = Bundle.RESOLVED |
+                                                     Bundle.STARTING |
+                                                     Bundle.ACTIVE |
+                                                     Bundle.STOPPING;
 
-    RegisteredServiceType()
-    {
-    }
-
-    /**
-     * Records all services supplied by a bundle.
-     *
-     * @param bundleId the Provider bundle ID.
-     * @param providers the fully qualified Provider implementation class names.
-     */
-    synchronized void putProviders(long bundleId,
-                                   Set<String> providers)
-    {
-      List<String> implementations =
-          Collections.unmodifiableList(new ArrayList<>(providers));
-      providersByBundle_.put(bundleId, implementations);
-      generation_.incrementAndGet();
-    }
-
-    /**
-     * Removes all Provider implementations associated with a bundle.
-     *
-     * @param bundleId the Provider bundle ID.
-     *
-     * @return {@code true} if a registration was removed; {@code false} if the
-     *         bundle had no registration for this Service Type.
-     */
-    synchronized boolean removeProviderBundle(long bundleId)
-    {
-      if (providersByBundle_.remove(Long.valueOf(bundleId)) == null)
-        {
-          return false;
-        }
-      generation_.incrementAndGet();
-      return true;
-    }
-
-    synchronized void invalidateBundle(long bundleId)
-    {
-      if (providersByBundle_.containsKey(Long.valueOf(bundleId)))
-        {
-          generation_.incrementAndGet();
-        }
-    }
-
-    long getGeneration()
-    {
-      return generation_.get();
-    }
-
-    /**
-     * Copies the current provider registry into {@code destination} and
-     * returns the generation belonging to that copy.
-     *
-     * <p>The copy and generation read are performed under the same monitor,
-     * so callers cannot observe a registry from one generation paired with a
-     * generation from another.</p>
-     */
-    synchronized long copyProvidersTo(Map<Long, List<String>> destination)
-    {
-      Objects.requireNonNull(destination, "destination");
-      destination.clear();
-      destination.putAll(providersByBundle_);
-      return generation_.get();
-    }
-  }
+  // for internal debug.
+  private static final boolean DEBUG = false;
+  /*--------------------------- variables -----------------------------*/
 
   public static volatile MediatorActivator activator_;
 
@@ -125,20 +47,6 @@ public class MediatorActivator implements BundleActivator
 
   /** The current logger; defaults to a no-op logger until Log Service appears. */
   public static volatile Logger logger_ = NO_OP_LOGGER;
-
-  /** Returns the bundle supplying the currently active mediator, if any. */
-  static Bundle activatorBundle()
-  {
-    MediatorActivator activator = activator_;
-    return activator == null || activator.bundleContext_ == null
-        ? null
-        : activator.bundleContext_.getBundle();
-  }
-
-  Bundle getMediatorBundle()
-  {
-    return bundleContext_ == null ? null : bundleContext_.getBundle();
-  }
 
   private ServiceTracker<LoggerFactory, LoggerFactory> loggerFactoryTracker_;
 
@@ -150,25 +58,33 @@ public class MediatorActivator implements BundleActivator
   private BundleTracker providerBundleTracker_;
   @SuppressWarnings("rawtypes")
   private ServiceRegistration weavingHookService_;
+  private final ConcurrentMap<String, Map<Long, List<ProviderCapability>>>
+    serviceLoaderCapabilities_ = new ConcurrentHashMap<>();
 
-  private static final boolean debug_ = false;
+  private final ConcurrentMap<String, Map<Long, ProviderEntry>>
+    serviceLoaderEntries_ = new ConcurrentHashMap<>();
 
-  private final ConcurrentMap<String, RegisteredServiceType> registeredServiceTypes_ =
-    new ConcurrentHashMap<>();
-
-  private final ConcurrentMap<Bundle, Set<String>> consumerRequirements_ =
+  /**
+   * Visibility records for processed consumer bundles.
+   *
+   * <ul>
+   *   <li>No entry means the bundle does not have processor extenders.</li>
+   *   <li>{@code unrestricted_ == true} means all registered provider bundles
+   *       are visible for every Service Type.</li>
+   *   <li>{@code unrestricted_ == false} with no provider bundle IDs for a
+   *       Service Type means requirements exist but no provider wire resolved
+   *       for that Service Type.</li>
+   *   <li>{@code unrestricted_ == false} with provider bundle IDs for a
+   *       Service Type means only those provider bundles are visible for that
+   *       Service Type.</li>
+   * </ul>
+   */
+  private final ConcurrentMap<Bundle, ConsumerVisibility> consumerRequirements_ =
       new ConcurrentHashMap<>();
 
-  private static final int CONSUMER_TRACKED_STATES = Bundle.RESOLVED |
-                                                     Bundle.STARTING |
-                                                     Bundle.ACTIVE;
+  private ProviderBundleLifecycleManager providerBundleLifecycleManager_;
 
-  private static final int PROVIDER_TRACKED_STATES = Bundle.INSTALLED |
-                                                     Bundle.RESOLVED |
-                                                     Bundle.STARTING |
-                                                     Bundle.ACTIVE |
-                                                     Bundle.STOPPING;
-
+  /*---------------------------- methods ------------------------------*/
   /**
    * <p>This method initializes the activator with the given bundle context and
    * starts the bundle trackers used to discover provider and consumer bundles.</p>
@@ -187,6 +103,10 @@ public class MediatorActivator implements BundleActivator
   public synchronized void start(BundleContext context) throws Exception
   {
     bundleContext_ = context;
+    providerBundleLifecycleManager_ =
+        new ProviderBundleLifecycleManager(context,
+                                           () -> logger_,
+                                           MediatorActivator::printDebug);
     activator_ = this;
     loggerFactoryTracker_ = new ServiceTracker<>(context, LoggerFactory.class,
         new ServiceTrackerCustomizer<LoggerFactory, LoggerFactory>()
@@ -214,18 +134,26 @@ public class MediatorActivator implements BundleActivator
           public void removedService(ServiceReference<LoggerFactory> reference,
                                      LoggerFactory factory)
           {
-            context.ungetService(reference);
-            logger_ = NO_OP_LOGGER;
+            try
+            {
+              context.ungetService(reference);
+            }
+            finally
+            {
+              logger_ = NO_OP_LOGGER; // or the next available factory logger
+            }
           }
         });
     loggerFactoryTracker_.open();
-    WeavingHook wh = new serviceLoaderWeavingHook(this);
-    weavingHookService_ = context.registerService(WeavingHook.class.getName(), wh, null);
+
+    WeavingHook wh = new ServiceLoaderWeavingHook(this);
+    weavingHookService_ = context.registerService(WeavingHook.class.getName(),
+                                                  wh, null);
 
     providerBundleTracker_ = new BundleTracker(context,
                                                PROVIDER_TRACKED_STATES,
                                                new ServiceLoaderProviderTracker(this,
-                                                                                   context.getBundle()));
+                                                                                context.getBundle()));
     providerBundleTracker_.open();
 
     consumerBundleTracker_ = new BundleTracker(context,
@@ -237,14 +165,29 @@ public class MediatorActivator implements BundleActivator
   @Override
   public void stop(BundleContext context)
   {
-    activator_ = null;
-    weavingHookService_.unregister();
+    // protects against an unusual overlapping restart.
+    if (activator_ == this)
+    {
+      activator_ = null;
+    }
     consumerBundleTracker_.close();
     providerBundleTracker_.close();
+    providerBundleLifecycleManager_.close();
+    weavingHookService_.unregister();
     loggerFactoryTracker_.close();
     logger_ = NO_OP_LOGGER;
   }
 
+  /**
+   * Creates the fallback logger used while no OSGi {@link LoggerFactory} is
+   * available and during mediator shutdown.
+   *
+   * <p>The returned logger is intentionally silent: its enabled checks return
+   * {@code false}, its logging methods do nothing, and {@link Logger#getName()}
+   * returns {@code "noop"}. This lets mediator code log without null checks.</p>
+   *
+   * @return a no-op logger.
+   */
   private static Logger createNoOpLogger()
   {
     return (Logger)Proxy.newProxyInstance(
@@ -284,11 +227,22 @@ public class MediatorActivator implements BundleActivator
   public void unregisterConsumerBundle(Bundle bundle)
   {
     consumerRequirements_.remove(bundle);
+    providerBundleLifecycleManager_.removeConsumer(bundle);
   }
 
-  public void registerConsumerBundle(Bundle bundle, Set<String> serviceTypes)
+  /**
+   * Registers a consumer and, for standard OSGi metadata, captures
+   * the provider bundles selected by its resolved service-loader wires.
+   *
+   * @param bundle the consumer host bundle.
+   * @param visibility the provider visibility selected for the consumer.
+   */
+  public void registerConsumerBundle(Bundle bundle,
+                                     ConsumerVisibility visibility)
   {
-    consumerRequirements_.put(bundle, serviceTypes);
+    Objects.requireNonNull(bundle, "bundle");
+    Objects.requireNonNull(visibility, "visibility");
+    consumerRequirements_.put(bundle, visibility);
   }
 
   /**
@@ -299,36 +253,82 @@ public class MediatorActivator implements BundleActivator
     return consumerRequirements_.containsKey(bundle);
   }
 
-  /**
-   * Records all Service Provider implementations supplied by a bundle for a
-   * specific Service Type.
-   *
-   * @param serviceType the fully qualified name of the provided Service Type.
-   * @param bundle the bundle supplying the Service Provider implementations.
-   * @param providers the fully qualified names of the Provider implementation
-   *        classes.
-   */
-  public void registerProviderBundle(String serviceType,
-                                     Bundle bundle,
-                                     Set<String> providers)
+
+  public void registerServiceproviderCapabilities(Bundle providerBundle,
+                                                  ProviderCapability capability)
   {
-    Objects.requireNonNull(serviceType, "serviceType");
-    Objects.requireNonNull(bundle, "bundle");
-    Objects.requireNonNull(providers, "providers");
+    Objects.requireNonNull(providerBundle, "providerBundle");
 
-    RegisteredServiceType registeredType =
-        registeredServiceTypes_.computeIfAbsent(serviceType,
-                                                ignored -> new RegisteredServiceType());
+    serviceLoaderCapabilities_.
+      compute(capability.getServiceType(),
+              (ignored, existingCaps) ->
+                {
+                  Map<Long, List<ProviderCapability>> updatedCaps =
+                     existingCaps == null ? new HashMap<>() : existingCaps;
 
-    registeredType.putProviders(bundle.getBundleId(), providers);
-    logger_.info(String.format("Registered provider bundle %d of service Type  %s",
-                 bundle.getBundleId(), serviceType));
-    printDebug(String.format("Registered provider bundle %d of service Type  %s",
-                              bundle.getBundleId(), serviceType));
+                  updatedCaps.compute(providerBundle.getBundleId(),
+                                      (ignored2, caps) ->
+                                        {
+                                          List<ProviderCapability> updatedSet =
+                                          caps == null ? new java.util.ArrayList<>()
+                                                       : caps;
+                                          updatedSet.add(capability);
+                                          return updatedSet;
+                                      });
+                  return updatedCaps;
+                });
+  }
+
+  public void registerServiceProviderEntries(Bundle providerBundle,
+                                             ProviderEntry entry)
+  {
+    Objects.requireNonNull(providerBundle, "providerBundle");
+    Objects.requireNonNull(entry, "entry");
+
+    serviceLoaderEntries_.
+      compute(entry.serviceType(),
+              (ignored, existingEntries) ->
+                {
+                  Map<Long, ProviderEntry> updatedEntries =
+                    existingEntries == null ? new HashMap<>() : existingEntries;
+
+                  updatedEntries.put(providerBundle.getBundleId(), entry);
+
+                  logger_.info(String.format("Registered provider bundle %d of service Type  %s",
+                              providerBundle.getBundleId(),
+                              entry.serviceType()));
+                  printDebug(String.format("Registered provider bundle %d of service Type  %s",
+                              providerBundle.getBundleId(),
+                              entry.serviceType()));
+                  return updatedEntries;
+                });
+  }
+
+  /**
+   * Records that a consumer bundle has prepared a provider successfully.
+   *
+   * <p>The dependency is deliberately retained until
+   * {@link #unregisterConsumerBundle(Bundle)}. An iterator can return the
+   * prepared provider from {@code next()}, after which consumer code can retain
+   * it without further mediator callbacks.</p>
+   *
+   * @param provider the bundle that supplies the prepared provider.
+   * @param consumer the bundle that prepared the provider.
+   */
+  public void addDependency(Bundle provider, Bundle consumer)
+  {
+    providerBundleLifecycleManager_.addDependency(provider, consumer);
   }
 
   /**
    * Removes all Service Provider registrations associated with a bundle.
+   *
+   * <p>Any pending delayed-stop request is cancelled because it belongs to the
+   * provider registration being removed. This releases references and prevents
+   * work from an old registration from surviving an update, uninstall, or later
+   * re-registration of the same bundle. Removing the dependency state would
+   * also cause a stale task's final idle check to fail, but cancelling it here
+   * eagerly removes the obsolete task from the scheduler.</p>
    *
    * @param bundle the Provider bundle to remove.
    * @return {@code true} if the bundle was registered as a provider,
@@ -340,72 +340,105 @@ public class MediatorActivator implements BundleActivator
     long bundleId = bundle.getBundleId();
     AtomicBoolean result = new AtomicBoolean();
 
-    registeredServiceTypes_.forEach(
-        (serviceType, registeredType) ->
+    serviceLoaderCapabilities_.forEach((serviceType, capsByBundle) -> {
+      if (capsByBundle.remove(bundleId) != null)
         {
-          if (registeredType.removeProviderBundle(bundleId))
-            {
-              result.set(true);
-              logger_.info(String.format("Unregistered provider bundle %d for service Type  %s",
-                          bundleId, serviceType));
-              printDebug("Unregistered provider bundle "
-                  + bundleId + " for service type "  + serviceType);
-            }
-        });
+          result.set(true);
+          logger_.info(String.format("Unregistered provider bundle %d for service Type  %s",
+                      bundleId, serviceType));
+          printDebug("Unregistered provider bundle " + bundleId +
+                     " for service type " + serviceType);
+        }
+    });
+    serviceLoaderEntries_.forEach((serviceType, entriesByBundle) -> {
+      if (entriesByBundle.remove(bundleId) != null)
+        {
+          result.set(true);
+        }
+    });
+
+    if (result.get())
+      {
+        logger_.info(String.format("Unregistered provider bundle %d ", bundleId));
+      }
+    providerBundleLifecycleManager_.removeProvider(bundle);
     return result.get();
   }
 
-  /**
-   * Invalidates cached provider instances when a registered provider bundle
-   * begins stopping while retaining its mediator provider definitions. A later
-   * ServiceLoader lookup can then start the bundle and create a fresh instance.
-   *
-   * @param bundle the provider bundle entering the stopping state.
-   */
-  public void providerBundleStopping(Bundle bundle)
-  {
-    Objects.requireNonNull(bundle, "bundle");
-    long bundleId = bundle.getBundleId();
-    registeredServiceTypes_.values().forEach(type -> type.invalidateBundle(bundleId));
-  }
-
-  /**
-   * Returns the generation used by mediated ServiceLoader caches to detect
-   * changes to one Service Type's provider registrations or lifecycle.
-   *
-   * @return the current provider generation.
-   */
-  public long getProviderGeneration(String serviceType)
+  public void getProviders(String serviceType,
+                           Bundle consumerBundle,
+                           Map<Long, Set<String>> result)
   {
     Objects.requireNonNull(serviceType, "serviceType");
-    RegisteredServiceType type = registeredServiceTypes_.get(serviceType);
-    return type == null ? 0 : type.getGeneration();
-  }
+    Objects.requireNonNull(consumerBundle, "consumerBundle");
+    Objects.requireNonNull(result, "result");
 
-  /**
-   * Copies the registered Provider information for a Service Type into the
-   * supplied destination and returns the generation belonging to that copy.
-   *
-   * @param serviceType the fully qualified name of the requested Service Type.
-   * @param destination the map to clear and populate.
-   *
-   * @return the provider generation, or {@code 0} if the Service Type has
-   *         never been registered.
-   */
-  public long getRegisteredProviders(String serviceType,
-                                     Map<Long, List<String>> destination)
-  {
-    Objects.requireNonNull(serviceType, "serviceType");
-    Objects.requireNonNull(destination, "destination");
-
-    RegisteredServiceType type = registeredServiceTypes_.get(serviceType);
-
-    if (type == null)
+    result.clear();
+    Map<Long, ProviderEntry> entries = serviceLoaderEntries_.get(serviceType);
+    if (entries == null || entries.isEmpty())
       {
-        destination.clear();
-        return 0;
+        return;
       }
-    return type.copyProvidersTo(destination);
+
+    ConsumerVisibility visibility =
+      consumerRequirements_.get(consumerBundle);
+
+    if (visibility == null)
+      {
+        // Metadata-free Consumer: every scanned ProviderEntry is a candidate.
+        addCompatibleProviders(entries,
+                               entries.keySet(),
+                               serviceType,
+                               consumerBundle,
+                               result);
+        return;
+      }
+
+    // Standard Service Loader Mediator Consumer: only bundles that publish an
+    // osgi.serviceloader capability for this Service Type are candidates.
+    Map<Long, List<ProviderCapability>> capabilities =
+      serviceLoaderCapabilities_.get(serviceType);
+
+    if (capabilities == null || capabilities.isEmpty())
+      {
+        return;
+      }
+
+    Set<Long> candidateBundleIds = new HashSet<>();
+    for (Long bundleId : capabilities.keySet())
+      {
+        if (visibility.allows(serviceType, bundleId.longValue()))
+          {
+            candidateBundleIds.add(bundleId);
+          }
+      }
+    addCompatibleProviders(entries,
+                           candidateBundleIds,
+                           serviceType,
+                           consumerBundle,
+                           result);
+  }
+
+  private static void addCompatibleProviders(Map<Long, ProviderEntry> entries,
+                                             Set<Long> candidateBundleIds,
+                                             String serviceType,
+                                             Bundle consumerBundle,
+                                             Map<Long, Set<String>> result)
+  {
+    String packageName = ProviderEntry.packageOf(serviceType);
+    BundleCapability consumerPackageCapability =
+      ProviderEntry.packageCapability(consumerBundle, packageName);
+
+    for (Long bundleId : candidateBundleIds)
+      {
+        ProviderEntry entry = entries.get(bundleId);
+        if (entry != null &&
+            ProviderEntry.sameCapability(entry.packageCapability(),
+                                         consumerPackageCapability))
+          {
+            result.put(bundleId, entry.implementationClasses());
+          }
+      }
   }
 
   public Bundle getBundle(long bundleId)
@@ -413,12 +446,18 @@ public class MediatorActivator implements BundleActivator
     return bundleContext_.getBundle(bundleId);
   }
 
+  Bundle getMediatorBundle()
+  {
+    return bundleContext_ == null ? null : bundleContext_.getBundle();
+  }
+
   // for internal debug.
   public static void printDebug(String s)
   {
-    if (debug_)
+    if (DEBUG)
       {
         System.out.println(s);
       }
   }
+
 }

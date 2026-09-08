@@ -1,0 +1,7 @@
+Bundle-SymbolicName: com.aicas.osgi.serviceloader-realworld-itests
+Bundle-Name: OSGi ServiceLoader real-world integration tests
+Bundle-Description: In-framework compatibility tests for third-party ServiceLoader consumers and providers.
+
+Test-Cases: ${classes;HIERARCHY_INDIRECTLY_ANNOTATED;org.junit.platform.commons.annotation.Testable;CONCRETE}
+-privatepackage: com.aicas.osgi.spi.realworld.*
+-noextraheaders: true

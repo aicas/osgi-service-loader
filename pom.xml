@@ -17,6 +17,7 @@
     <module>serviceloader-mediator</module>
     <module>serviceloader-itests/testbundles</module>
     <module>serviceloader-itests</module>
+    <module>serviceloader-realworld-itests</module>
     <module>example</module>
   </modules>
 
@@ -27,6 +28,7 @@
     <maven.compiler.release>17</maven.compiler.release>
 
     <maven.compiler.plugin.version>3.14.0</maven.compiler.plugin.version>
+    <maven.jar.plugin.version>3.4.2</maven.jar.plugin.version>
     <maven.bundle.plugin.version>6.1.0</maven.bundle.plugin.version>
     <maven.assembly.plugin.version>3.8.0</maven.assembly.plugin.version>
     <maven.surefire.plugin.version>3.5.3</maven.surefire.plugin.version>
@@ -39,6 +41,10 @@
     <osgi.tracker.version>1.5.4</osgi.tracker.version>
     <osgi.log.version>1.5.0</osgi.log.version>
     <asm.version>9.10.1</asm.version>
+    <bnd.version>7.4.0</bnd.version>
+    <junit.jupiter.version>5.14.2</junit.jupiter.version>
+    <junit.platform.version>1.14.2</junit.platform.version>
+    <assertj.version>3.27.7</assertj.version>
   </properties>
 
   <build>
@@ -53,6 +59,11 @@
           <groupId>org.apache.maven.plugins</groupId>
           <artifactId>maven-surefire-plugin</artifactId>
           <version>${maven.surefire.plugin.version}</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>${maven.jar.plugin.version}</version>
         </plugin>
         <plugin>
           <groupId>org.apache.maven.plugins</groupId>

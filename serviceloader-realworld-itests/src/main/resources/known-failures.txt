@@ -1,0 +1,31 @@
+# Format:
+# fully.qualified.TestClass#methodName | reason or issue
+# fully.qualified.TestClass#* | reason or issue
+#
+# Add only confirmed architectural limitations, implementation defects, or
+# deployment/resolution failures. Removing an entry enables that test again.
+#
+# Workflow
+#
+# When a test is currently unsupported, add an entry such as:
+# com.aicas.osgi.spi.realworld.JaxbServiceLoaderTest#marshalAndUnmarshalRoundTrip | Issue #123
+#
+# JUnit reports it as skipped:
+# Known failure: Issue #123
+#
+# After fixing the implementation, remove that line:
+# # Line removed
+#
+# The test executes normally in the next build.
+#
+# Recommended safeguards
+#
+# Each entry should include an issue number and a short reason. Avoid generic
+# descriptions with no expiry or follow-up path. For example:
+# com.aicas.osgi.spi.realworld.Test#* | Issue #970: requires context-class-loader delegation
+#
+# Later, add a validation test that rejects an unknown class, unknown test
+# method, duplicate entry, or an entry for a renamed or removed test.
+
+com.aicas.osgi.spi.realworld.RestAndPersistenceServiceLoaderTest#persistenceProviderResolverFindsEclipseLink | Invalid under R11: Jakarta Persistence uses an explicit application class loader
+com.aicas.osgi.spi.realworld.JdkFactoryServiceLoaderTest#staxFactoriesComeFromWoodstoxThroughTheTccl | JDK FactoryFinder cannot be woven

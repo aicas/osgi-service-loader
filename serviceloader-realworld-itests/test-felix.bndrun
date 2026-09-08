@@ -1,0 +1,32 @@
+-runfw: org.apache.felix.framework;version='[7.0.5,7.0.5]'
+-runee: JavaSE-17
+-tester: biz.aQute.tester.junit-platform
+
+#-runtrace: true
+
+#-runproperties: \
+#	felix.log.level=4,\
+#	tester.trace=true
+
+
+# Keep test execution in a normal Felix framework. The mediator's weaving
+# hook transforms third-party ServiceLoader call sites as their bundles load.
+-runrequires: \
+	bnd.identity;id='com.aicas.osgi.serviceloader-realworld-itests',\
+	bnd.identity;id='com.aicas.osgi.serviceloader-mediator',\
+	bnd.identity;id='com.aicas.osgi.serviceloader-weaver',\
+	bnd.identity;id='biz.aQute.tester.junit-platform',\
+	bnd.identity;id='junit-jupiter-engine',\
+	bnd.identity;id='junit-platform-commons',\
+	bnd.identity;id='junit-platform-engine',\
+	bnd.identity;id='junit-platform-launcher',\
+	bnd.identity;id='org.opentest4j',\
+	bnd.identity;id='org.glassfish.jaxb.runtime',\
+	bnd.identity;id='org.eclipse.parsson',\
+	bnd.identity;id='yasson',\
+	bnd.identity;id='org.glassfish.jersey.core.jersey-common',\
+	bnd.identity;id='org.eclipse.persistence.jpa',\
+	bnd.identity;id='org.eclipse.angus.mail',\
+	bnd.identity;id='org.hibernate.validator',\
+	bnd.identity;id='org.glassfish.tyrus.container-grizzly-client',\
+	bnd.identity;id='com.fasterxml.woodstox.woodstox-core'

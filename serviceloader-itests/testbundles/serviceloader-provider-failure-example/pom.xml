@@ -36,7 +36,7 @@
   <dependencies>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-spi-example</artifactId>
+      <artifactId>serviceloader-spi</artifactId>
       <version>${revision}</version>
     </dependency>
   </dependencies>

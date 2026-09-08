@@ -17,14 +17,14 @@
   <name>ServiceLoader integration-test bundles</name>
 
   <modules>
+    <module>serviceloader-spi-v2</module>
+    <module>serviceloader-provider-v2</module>
+    <module>serviceloader-consumer-v2</module>
     <module>serviceloader-embedded-consumer</module>
     <module>serviceloader-embedded-consumer-bundle</module>
-    <module>serviceloader-unprocessed-consumer</module>
     <module>serviceloader-consumer-update-example</module>
     <module>serviceloader-provider-failure-example</module>
     <module>serviceloader-provider-moduleinfo-update-example</module>
-    <module>serviceloader-consumer-fragment</module>
-    <module>serviceloader-consumer-fragment-host</module>
     <module>serviceloader-two-service-provider-fragment</module>
     <module>serviceloader-two-service-provider-host</module>
     <module>serviceloader-provider-update-example</module>

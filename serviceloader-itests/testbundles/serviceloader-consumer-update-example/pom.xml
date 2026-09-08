@@ -24,7 +24,7 @@
         <extensions>true</extensions>
         <configuration>
           <instructions>
-            <Bundle-SymbolicName>com.aicas.osgi.example.serviceloader-consumer-example</Bundle-SymbolicName>
+            <Bundle-SymbolicName>com.aicas.osgi.example.serviceloader-consumer-metadata</Bundle-SymbolicName>
             <Bundle-Version>2.0.0</Bundle-Version>
             <Import-Package>org.osgi.framework</Import-Package>
             <Bundle-Activator>com.aicas.osgi.spi.example.consumer.UpdatedConsumerActivator</Bundle-Activator>
