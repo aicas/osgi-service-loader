@@ -5,69 +5,49 @@
 
 package com.aicas.osgi.spi.proxy.internal;
 
-import java.io.IOException;
-import java.io.InputStream;
-import java.lang.module.InvalidModuleDescriptorException;
-import java.lang.module.ModuleDescriptor;
-import java.net.URL;
-import java.util.Collections;
-import java.util.List;
-import java.util.Set;
-
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleEvent;
 import org.osgi.framework.wiring.BundleRevision;
 import org.osgi.util.tracker.BundleTrackerCustomizer;
 
+import java.util.List;
+
 /**
- * Every non-fragment host bundle is inspected for consumer metadata. Its
- * metadata is refreshed when the host revision or its attached-fragment
- * revision set changes, and removed when the host leaves the tracked state
- * set. Only hosts that declare Service Loader consumer metadata through
- * {@code osgi.serviceloader} requirements or {@code uses} declarations in
- * {@code module-info.class} are registered for weaving.
+ * Every non-fragment host bundle is inspected for consumer metadata when it
+ * enters the tracked state set. Only hosts whose processor extender requirement
+ * selects this mediator are registered with the mediator. Metadata-free
+ * consumers are selected by the weaving hook and resolved at runtime.
  */
 public class ServiceLoaderConsumerTracker implements
-BundleTrackerCustomizer<ServiceLoaderConsumerTracker.ConsumerBundleInfo>
+BundleTrackerCustomizer<Bundle>
 {
-  /**
-   * Tracks the host revision and attached fragment revisions used to discover
-   * one consumer bundle's metadata.
-   */
-  static class ConsumerBundleInfo
-  {
-    private List<BundleRevision> revisions_;
-
-    ConsumerBundleInfo(List<BundleRevision> revisions)
-    {
-      revisions_ = List.copyOf(revisions);
-    }
-
-    boolean hasSameRevisions(List<BundleRevision> revisions)
-    {
-      return revisions_.equals(revisions);
-    }
-
-    void updateRevisions(List<BundleRevision> revisions)
-    {
-      revisions_ = List.copyOf(revisions);
-    }
-  }
-
   private final MediatorActivator activator_;
 
+  /**
+   * Creates a tracker that registers processed consumer Bundles with the
+   * supplied mediator.
+   *
+   * @param baseActivator the active mediator
+   */
   public ServiceLoaderConsumerTracker(MediatorActivator baseActivator)
   {
     this.activator_ = baseActivator;
   }
 
+  /**
+   * Inspects and registers a non-fragment consumer Bundle when it enters the
+   * tracked state set.
+   *
+   * @return the tracked Bundle, or {@code null} for a fragment
+   */
   @Override
-  public ConsumerBundleInfo addingBundle(Bundle bundle, BundleEvent event)
+  public Bundle addingBundle(Bundle bundle, BundleEvent event)
   {
     if (event != null)
     {
-      MediatorActivator.printDebug("[CONSUMER_TRACKER] addingBundle[" + bundle.getBundleId() + "] " +
-              ServiceLoaderProviderTracker.getState(event.getType()));
+      MediatorActivator.printDebug("[CONSUMER_TRACKER] addingBundle[" +
+                                   bundle.getBundleId() + "] " +
+                                   ServiceLoaderProviderTracker.getState(event.getType()));
     }
 
     BundleRevision revision = bundle.adapt(BundleRevision.class);
@@ -77,128 +57,81 @@ BundleTrackerCustomizer<ServiceLoaderConsumerTracker.ConsumerBundleInfo>
         return null;
       }
 
-    ConsumerBundleInfo info = new ConsumerBundleInfo(
-        HeaderProcessor.getHostAndFragmentRevisions(bundle));
-    registerConsumerMetadata(bundle);
-    return info;
+    registerConsumer(bundle);
+    return bundle;
   }
 
   /**
-   * Reads and registers the current consumer metadata for a host bundle.
+   * Processes the ServiceLoader consumer requirements declared by the given
+   * bundle and its attached fragments for the specified mediator bundle.
    *
-   * <p>Invalid metadata is logged and ignored so that one malformed consumer
-   * does not prevent the tracker from processing other bundles.</p>
+   * <p>The host bundle revision and all attached fragment revisions are treated
+   * as one consumer unit. If any of these revisions declares an
+   * {@code osgi.extender} requirement for {@code osgi.serviceloader.processor},
+   * this method determines whether the resolved wire selects this mediator.
+   * When the host or an attached fragment declares an
+   * {@code osgi.serviceloader} requirement, the consumer receives restricted
+   * visibility based on its resolved service-loader wires. Otherwise, it has
+   * unrestricted provider visibility.</p>
+   *
+   * <p>This method does not inspect consumer class bytecode, determine whether
+   * a class invokes {@link java.util.ServiceLoader#load(Class)}, or resolve
+   * {@code osgi.serviceloader} requirements by their declared filters. It does
+   * inspect resolved extender wires to determine whether this mediator is the
+   * selected processor and resolved service-loader wires to identify the
+   * provider Bundles visible to a metadata-declaring consumer.</p>
+   *
+   * @param bundle the host bundle whose consumer requirements should be inspected.
    */
-  private boolean registerConsumerMetadata(Bundle bundle)
+  private void registerConsumer(Bundle bundle)
   {
-    try
-      {
-        HeaderProcessor.ConsumerRequirementResult result =
-            HeaderProcessor.processConsumerRequirements(
-            bundle, activator_.getMediatorBundle());
-        if (result.isSelectedByThisMediator())
-          {
-            activator_.registerConsumerBundle(bundle, result.getServiceTypes());
-          }
-        else if (!result.hasProcessorRequirement())
-          {
-            Set<String> serviceTypes = readModuleInfoUses(bundle);
-            if (!serviceTypes.isEmpty())
-              {
-                activator_.registerConsumerBundle(bundle, serviceTypes);
-              }
-          }
-        return true;
-      }
-    catch (IOException e)
-      {
-        MediatorActivator.logger_.warn(
-            "Could not read Service Loader consumer metadata from bundle " +
-            bundle.getSymbolicName() + " (" + bundle.getBundleId() + ")",
-            e);
-        return false;
-      }
-  }
+    List<BundleRevision> revisions = HeaderProcessor.getHostAndFragmentRevisions(bundle);
 
-  /**
-   * Determines whether the specified bundle declares at least one ServiceLoader
-   * consumer in its {@code module-info.class}.
-   *
-   * <p>A bundle is considered a consumer when its module descriptor contains at
-   * least one {@code uses <service-type>} declaration.</p>
-   *
-   * @param bundle the bundle to inspect
-   * @return the service types declared by the module descriptor, or an empty
-   *         set if no module descriptor exists or no {@code uses} declaration
-   *         is present
-   * @throws IOException
-   */
-  private Set<String> readModuleInfoUses(Bundle bundle)
-    throws IOException
-  {
-    URL moduleInfoURL =
-      bundle.getEntry(MediatorConstants.MODULE_INFO);
-
-    if (moduleInfoURL == null)
-      {
-        return Collections.emptySet();
-      }
-
-    try (InputStream input = moduleInfoURL.openStream())
-      {
-        return ModuleDescriptor.read(input).uses();
-      }
-    catch (IOException | InvalidModuleDescriptorException e)
-      {
-        throw new IOException("Could not read module descriptor from bundle " +
-                              bundle.getBundleId() + ": " + moduleInfoURL,
-                              e);
-      }
-  }
-
-  /**
-   * Refreshes consumer metadata when a bundle update replaces the host revision
-   * or when fragment attachment changes the host-and-fragment revision set.
-   *
-   * <p>A bundle update creates a new class space. Classes subsequently loaded
-   * from that revision are presented to the weaving hook and are therefore
-   * woven according to the refreshed consumer metadata. Already loaded classes
-   * from the previous revision are not woven again.</p>
-   */
-  @Override
-  public void modifiedBundle(Bundle bundle, BundleEvent event,
-                             ConsumerBundleInfo info)
-  {
-    if (info == null)
+    // The Service Loader Mediator specification requires a Consumer to select
+    // exactly one processor mediator. Reject a processor wire declared with
+    // cardinality:=multiple to avoid processing the same Consumer through
+    // multiple processor extenders.
+    if (!HeaderProcessor.hasMediatorExtenderWire(revisions,
+                                                 MediatorConstants.PROCESSOR_EXTENDER_NAME,
+                                                 activator_.getMediatorBundle(),
+                                                 true))
       {
         return;
       }
-
-    List<BundleRevision> currentRevisions =
-        HeaderProcessor.getHostAndFragmentRevisions(bundle);
-    if (!info.hasSameRevisions(currentRevisions) ||
-        (event != null && event.getType() == BundleEvent.RESOLVED))
-      {
-        MediatorActivator.printDebug("[CONSUMER_TRACKER] Refresh[" +
-                                     bundle.getBundleId() + "]");
-        activator_.unregisterConsumerBundle(bundle);
-        if (registerConsumerMetadata(bundle))
-          {
-            info.updateRevisions(currentRevisions);
-          }
-      }
+    ConsumerVisibility visibility =
+            HeaderProcessor.hasServiceLoaderMetadata(bundle,
+                    HeaderProcessor.MetadataKind.REQUIREMENT) ? ConsumerVisibility.fromResolvedWires(bundle) :
+                                                                ConsumerVisibility.unrestricted();
+    activator_.registerConsumerBundle(bundle, visibility);
   }
 
+  /**
+   * Leaves registration unchanged while the tracked Bundle remains in the
+   * tracked state set. A new revision is registered after the Bundle leaves
+   * and later re-enters that set.
+   */
+  @Override
+  public void modifiedBundle(Bundle bundle, BundleEvent event,
+                             Bundle ignored)
+  {
+    // Consumer registration is rebuilt when the Bundle leaves and re-enters
+    // the tracked state set.
+  }
+
+  /**
+   * Removes consumer registration and any associated provider lifecycle
+   * dependencies when a tracked Bundle leaves the tracked state set.
+   */
   @Override
   public void removedBundle(Bundle bundle, BundleEvent event,
-                            ConsumerBundleInfo info)
+                            Bundle ignored)
   {
     if(event!=null)
     {
-      MediatorActivator.printDebug("[CONSUMER_TRACKER] removedBundle[" + bundle.getBundleId() + "] "
-              + ServiceLoaderProviderTracker.getState(event.getType()));
+      MediatorActivator.printDebug("[CONSUMER_TRACKER] removedBundle[" +
+                                   bundle.getBundleId() + "] " +
+                                   ServiceLoaderProviderTracker.getState(event.getType()));
     }
     activator_.unregisterConsumerBundle(bundle);
   }
-
 }

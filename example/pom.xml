@@ -16,14 +16,14 @@
   <packaging>pom</packaging>
 
   <modules>
-    <module>serviceloader-consumer-example</module>
-    <module>serviceloader-osgi-client-example</module>
-    <module>serviceloader-provider-example</module>
-    <module>serviceloader-provider-consumer-example</module>
-    <module>serviceloader-provider-fragment-example</module>
-    <module>serviceloader-provider-fragment-host-example</module>
-    <module>serviceloader-provider-moduleinfo-example</module>
-    <module>serviceloader-spi-example</module>
+    <module>serviceloader-consumer-metadata</module>
+    <module>serviceloader-osgi-client</module>
+    <module>serviceloader-provider-metadata</module>
+    <module>serviceloader-consumer</module>
+    <module>serviceloader-provider-fragment</module>
+    <module>serviceloader-provider</module>
+    <module>serviceloader-provider-moduleinfo</module>
+    <module>serviceloader-spi</module>
   </modules>
 
 </project>

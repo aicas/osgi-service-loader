@@ -47,12 +47,27 @@
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-spi-example</artifactId>
+      <artifactId>serviceloader-spi</artifactId>
+      <version>${revision}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.aicas.osgi.testbundle</groupId>
+      <artifactId>serviceloader-spi-v2</artifactId>
+      <version>2.0.0-SNAPSHOT</version>
+    </dependency>
+    <dependency>
+      <groupId>com.aicas.osgi.testbundle</groupId>
+      <artifactId>serviceloader-provider-v2</artifactId>
+      <version>${revision}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.aicas.osgi.testbundle</groupId>
+      <artifactId>serviceloader-consumer-v2</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-provider-example</artifactId>
+      <artifactId>serviceloader-provider-metadata</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
@@ -63,11 +78,6 @@
     <dependency>
       <groupId>com.aicas.osgi.testbundle</groupId>
       <artifactId>serviceloader-consumer-update-example</artifactId>
-      <version>${revision}</version>
-    </dependency>
-    <dependency>
-      <groupId>com.aicas.osgi.testbundle</groupId>
-      <artifactId>serviceloader-unprocessed-consumer</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
@@ -87,16 +97,6 @@
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.testbundle</groupId>
-      <artifactId>serviceloader-consumer-fragment-host</artifactId>
-      <version>${revision}</version>
-    </dependency>
-    <dependency>
-      <groupId>com.aicas.osgi.testbundle</groupId>
-      <artifactId>serviceloader-consumer-fragment</artifactId>
-      <version>${revision}</version>
-    </dependency>
-    <dependency>
-      <groupId>com.aicas.osgi.testbundle</groupId>
       <artifactId>serviceloader-two-service-provider-host</artifactId>
       <version>${revision}</version>
     </dependency>
@@ -107,32 +107,32 @@
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-provider-moduleinfo-example</artifactId>
+      <artifactId>serviceloader-provider-moduleinfo</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-provider-consumer-example</artifactId>
+      <artifactId>serviceloader-consumer</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-provider-fragment-example</artifactId>
+      <artifactId>serviceloader-provider-fragment</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-provider-fragment-host-example</artifactId>
+      <artifactId>serviceloader-provider</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-consumer-example</artifactId>
+      <artifactId>serviceloader-consumer-metadata</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-osgi-client-example</artifactId>
+      <artifactId>serviceloader-osgi-client</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
@@ -169,27 +169,27 @@
         </executions>
         <configuration>
           <includes>
-            <include>**/*IntegrationTest.java</include>
+            <include>**/*Test.java</include>
           </includes>
           <classpathDependencyExcludes>
-            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-consumer-example</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-osgi-client-example</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-spi-v2</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-provider-v2</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-consumer-v2</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-consumer-metadata</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-osgi-client</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-embedded-consumer</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-embedded-consumer-bundle</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-unprocessed-consumer</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-consumer-update-example</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-example</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-metadata</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-provider-update-example</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-provider-moduleinfo-update-example</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-provider-failure-example</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-consumer-fragment-host</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-consumer-fragment</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-two-service-provider-host</classpathDependencyExclude>
             <classpathDependencyExclude>com.aicas.osgi.testbundle:serviceloader-two-service-provider-fragment</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-moduleinfo-example</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-consumer-example</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-fragment-example</classpathDependencyExclude>
-            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-fragment-host-example</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-moduleinfo</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-consumer</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider-fragment</classpathDependencyExclude>
+            <classpathDependencyExclude>com.aicas.osgi.example:serviceloader-provider</classpathDependencyExclude>
           </classpathDependencyExcludes>
         </configuration>
       </plugin>

@@ -24,7 +24,7 @@
         <extensions>true</extensions>
         <configuration>
           <instructions>
-            <Bundle-SymbolicName>com.aicas.osgi.example.serviceloader-provider-example</Bundle-SymbolicName>
+            <Bundle-SymbolicName>com.aicas.osgi.example.serviceloader-provider-metadata</Bundle-SymbolicName>
             <Bundle-Version>2.0.0</Bundle-Version>
             <Import-Package>com.aicas.osgi.spi.example.spi</Import-Package>
             <Private-Package>com.aicas.osgi.spi.example.provider</Private-Package>
@@ -39,7 +39,7 @@
   <dependencies>
     <dependency>
       <groupId>com.aicas.osgi.example</groupId>
-      <artifactId>serviceloader-spi-example</artifactId>
+      <artifactId>serviceloader-spi</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>

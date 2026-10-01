@@ -1,0 +1,5 @@
+# A comment and blank lines are ignored.
+
+com.example.providers.AlphaProvider
+  com.example.providers.BetaProvider  # an inline comment is ignored
+com.example.providers.AlphaProvider

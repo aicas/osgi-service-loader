@@ -17,6 +17,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -59,31 +60,27 @@ import com.aicas.osgi.spi.proxy.internal.MediatorActivator;
  *
  * <p>The Java delegate is created according to the invoked load method:</p>
  * <ul>
- *   <li>{@link #load(Class)} uses
+ *   <li>{@link #load(Class,Class)} uses
  *       {@link java.util.ServiceLoader#load(Class)}, and therefore uses the
  *       current thread context class loader.</li>
- *   <li>{@link #load(Class, ClassLoader)} normally preserves the
+ *   <li>{@link #load(Class, ClassLoader, Class)} normally preserves the
  *       supplied class loader by calling
  *       {@link java.util.ServiceLoader#load(Class, ClassLoader)}.</li>
- *   <li>If mediation is available and the supplied class loader implements
- *       {@link BundleReference}, OSGi providers are resolved by the mediator.
- *       In that case the Java delegate is created with
- *       {@link java.util.ServiceLoader#load(Class)} instead of retaining
- *       provider instances through the supplied bundle class loader. This
- *       reduces the possibility of returning cached providers from a stopped
- *       or updated bundle. Providers visible only through that bundle class
- *       loader must consequently be published to the mediator.</li>
+ *   <li>{@link #load(Class, ClassLoader, Class)} enables mediation only when
+ *       the woven caller passes its own bundle class loader. The Java delegate
+ *       always retains the supplied class loader. Any other loader uses only
+ *       ordinary Java ServiceLoader discovery.</li>
  * </ul>
  *
  * <p>Mediator provider definitions are snapshotted when an iterator is created.
  * Provider instances are cached across iterators until {@link #reload()} is
- * called, the provider generation changes, or the mediator becomes
- * unavailable. An iterator rechecks the provider generation before returning
- * a prepared provider, so it does not return an instance prepared before a
- * provider stop, update, or removal.</p>
+ * called, mediation is unavailable or disabled, or the provider is no longer
+ * present in a later mediator snapshot. A provider prepared by
+ * {@link Iterator#hasNext()} is returned as prepared by
+ * {@link Iterator#next()}.</p>
  *
- * <p>If the mediator is unavailable, the mediator iterator is empty and the
- * returned loader uses only its Java delegate.</p>
+ * <p>If mediation is unavailable or disabled, the mediator iterator is empty
+ * and the returned loader uses only its Java delegate.</p>
  *
  * @param <S> the service type
  */
@@ -96,13 +93,14 @@ public class ServiceLoader<S> implements Iterable<S>
   private static final class ProviderDefinition
   {
     private final BundleRevision bundleRev;
-    private final String className;
+    private final String serviceImplemenation;
 
     ProviderDefinition(BundleRevision bundleRevision,
                        String className)
     {
       this.bundleRev = bundleRevision;
-      this.className = Objects.requireNonNull(className, "className");
+      this.serviceImplemenation = Objects.requireNonNull(className,
+              "serviceImplemenation");
     }
 
     @Override
@@ -121,14 +119,14 @@ public class ServiceLoader<S> implements Iterable<S>
       ProviderDefinition other = (ProviderDefinition)object;
 
       return bundleRev.equals(other.bundleRev) &&
-             className.equals(other.className);
+             serviceImplemenation.equals(other.serviceImplemenation);
     }
 
     @Override
     public int hashCode()
     {
       return 31 * bundleRev.hashCode() +
-             className.hashCode();
+             serviceImplemenation.hashCode();
     }
   }
 
@@ -152,7 +150,7 @@ public class ServiceLoader<S> implements Iterable<S>
     {
       if (providerClass == null)
         {
-          providerClass = (Class<? extends S>)loadProviderClass(definition);
+          providerClass = (Class<? extends S>) loadProviderClass(definition);
         }
       return providerClass;
     }
@@ -162,7 +160,7 @@ public class ServiceLoader<S> implements Iterable<S>
     {
       Class<? extends S> providerType = type();
       try
-        {
+        { // TODO: add acc check here
           Constructor<? extends S> constructor =
             providerType.getConstructor();
 
@@ -211,14 +209,11 @@ public class ServiceLoader<S> implements Iterable<S>
   private final class CombinedIterator implements Iterator<S>
   {
     private final Iterator<S>[] iterators;
-    private final MediatorServiceIterator mediatorIterator;
     /** Provider classes already returned by this combined iterator. */
     private final Set<Class<?>> seenProviderClasses =
         Collections.newSetFromMap(new IdentityHashMap<Class<?>, Boolean>());
     /** Candidate prepared by hasNext() for return from next(). */
     private S nextProvider;
-    /** Class prepared by the mediator iterator but not yet retrieved from it. */
-    private Class<?> preparedMediatorProviderClass;
     private int iteratorIndex = 0;
 
     /**
@@ -226,20 +221,14 @@ public class ServiceLoader<S> implements Iterable<S>
      *
      * @param iterators the provider iterators to consume in order
      */
-    CombinedIterator(Iterator<S>[] iterators,
-                     MediatorServiceIterator mediatorIterator)
+    CombinedIterator(Iterator<S>[] iterators)
     {
       this.iterators = iterators;
-      this.mediatorIterator = mediatorIterator;
     }
 
     @Override
     public boolean hasNext()
     {
-      if (preparedMediatorProviderClass != null)
-        {
-          return true;
-        }
       if (nextProvider != null)
         {
           return true;
@@ -248,26 +237,9 @@ public class ServiceLoader<S> implements Iterable<S>
       while (iteratorIndex < iterators.length)
         {
           Iterator<? extends S> iterator = iterators[iteratorIndex];
-          if (iterator == mediatorIterator)
-            {
-              if (!mediatorIterator.hasNext())
-                {
-                  iteratorIndex++;
-                  continue;
-                }
-              S candidate = mediatorIterator.getPreparedProvider();
-              if (seenProviderClasses.add(candidate.getClass()))
-                {
-                  preparedMediatorProviderClass = candidate.getClass();
-                  return true;
-                }
-              mediatorIterator.next();
-              continue;
-            }
           if (iterator != null && iterator.hasNext())
             {
               S candidate = iterator.next();
-
               if (seenProviderClasses.add(candidate.getClass()))
                 {
                   MediatorActivator.printDebug("[ITERATOR] check in the " +
@@ -276,7 +248,6 @@ public class ServiceLoader<S> implements Iterable<S>
                   nextProvider = candidate;
                   return true;
                 }
-
               MediatorActivator.printDebug("[ITERATOR] skip duplicate provider " +
                                            candidate.getClass().getName());
               continue;
@@ -293,19 +264,6 @@ public class ServiceLoader<S> implements Iterable<S>
         {
           throw new NoSuchElementException();
         }
-
-      if (preparedMediatorProviderClass != null)
-        {
-          Class<?> preparedClass = preparedMediatorProviderClass;
-          preparedMediatorProviderClass = null;
-          S result = mediatorIterator.next();
-          if (result.getClass() != preparedClass)
-            {
-              seenProviderClasses.remove(preparedClass);
-              seenProviderClasses.add(result.getClass());
-            }
-          return result;
-        }
       S result = nextProvider;
       nextProvider = null;
       return result;
@@ -317,12 +275,11 @@ public class ServiceLoader<S> implements Iterable<S>
    * Iterates over an immutable snapshot of Provider definitions.
    *
    * <p>The snapshot is captured when {@link ServiceLoader#iterator()} is
-   * called and rebuilt if the provider generation changes before the iterator
-   * returns a prepared provider.</p>
+   * called. Later mediator-registry changes do not affect this iterator.</p>
    *
-   * <p>Before a provider is instantiated, the availability of its provider
-   * bundle is checked. A provider whose bundle is no longer available is
-   * skipped.</p>
+   * <p>Cached provider instances are returned without checking the provider
+   * Bundle. When a new instance is needed, its Bundle is started if necessary
+   * before the provider class is loaded.</p>
    *
    * <p>The next valid Provider instance is prepared by
    * {@link #hasNext()} and returned by {@link #next()}.</p>
@@ -331,10 +288,7 @@ public class ServiceLoader<S> implements Iterable<S>
   {
     /**
      */
-    private ProviderDefinition[] definitionsArray;
-
-    /** Provider generation used to create {@link #definitionsArray}. */
-    private long providerGeneration;
+    private final ProviderDefinition[] definitionSnapshot;
 
     /**
      * Index of the next Provider definition to examine.
@@ -352,40 +306,9 @@ public class ServiceLoader<S> implements Iterable<S>
      *
      * @param providers the provider-definition snapshot.
      */
-    MediatorServiceIterator(ProviderDefinition[] providers,
-                            long providerGeneration)
+    MediatorServiceIterator(ProviderDefinition[] providers)
     {
-      this.definitionsArray = providers;
-      this.providerGeneration = providerGeneration;
-    }
-
-    /**
-     * Rebuilds this iterator's snapshot when a provider lifecycle or registry
-     * change occurred after the iterator was created.
-     */
-    private void refreshSnapshotIfProviderGenerationChanged()
-    {
-      MediatorActivator activator = MediatorActivator.activator_;
-      if (activator == null)
-        {
-          definitionsArray = new ProviderDefinition[0];
-          definitionIndex = 0;
-          nextProvider = null;
-          providerGeneration = Long.MIN_VALUE;
-          return;
-        }
-
-      long currentGeneration = activator.getProviderGeneration(serviceName);
-      if (currentGeneration != providerGeneration)
-        {
-          Set<ProviderDefinition> definitions = new LinkedHashSet<>();
-          long snapshotGeneration =
-              getCurrentProviderDefinitions(activator, definitions);
-          definitionsArray = definitions.toArray(ProviderDefinition[]::new);
-          definitionIndex = 0;
-          nextProvider = null;
-          providerGeneration = snapshotGeneration;
-        }
+      this.definitionSnapshot = providers;
     }
 
     /**
@@ -393,8 +316,8 @@ public class ServiceLoader<S> implements Iterable<S>
      *
      * <p>If a provider has already been prepared by an earlier
      * {@link #hasNext()} call, this method returns without advancing the
-     * definition index. Providers unavailable when a new instance would be
-     * created, and providers that fail to load or instantiate, are skipped.</p>
+     * definition index. Providers whose Bundles cannot be started, and
+     * providers that fail to load or instantiate, are skipped.</p>
      *
      * <p>A failing OSGi provider is isolated from its consumer: a
      * {@link ServiceConfigurationError} raised while loading or instantiating
@@ -406,8 +329,8 @@ public class ServiceLoader<S> implements Iterable<S>
      *
      * <p>Mediator providers are deliberately loaded and instantiated while
      * preparing {@code hasNext()}. A stopped OSGi provider bundle is normally
-     * started by {@link #createProviderIfAvailable(ProviderDefinition)} before
-     * the provider is loaded. The relevant race is that the bundle can be
+     * started by {@link #loadProviderClass(ProviderDefinition)} before the
+     * provider is loaded. The relevant race is that the bundle can be
      * uninstalled, updated, or otherwise become unable to start before the
      * provider is created; preparing the instance first lets {@code next()}
      * return a provider already known to be usable, rather than discovering a
@@ -421,31 +344,32 @@ public class ServiceLoader<S> implements Iterable<S>
      */
     private boolean prepareNextProvider()
     {
-      refreshSnapshotIfProviderGenerationChanged();
       if (nextProvider != null)
         {
           return true;
         }
 
       while (nextProvider == null &&
-             definitionIndex < definitionsArray.length)
+             definitionIndex < definitionSnapshot.length)
         {
           MediatorActivator.printDebug("[SERVICE_ITERATOR] prepare next Provider of index" +
                           definitionIndex);
-          ProviderDefinition definition = definitionsArray[definitionIndex++];
+          ProviderDefinition definition = definitionSnapshot[definitionIndex++];
           try
             {
               S provider = createProviderIfAvailable(definition);
               if (provider != null)
                 {
                   nextProvider = provider;
+                  MediatorActivator.activator_.addDependency(definition.bundleRev.getBundle(),
+                                                             consumerBundle);
                   return true;
                 }
             }
           catch (ServiceConfigurationError e)
             {
               MediatorActivator.logger_.warn("Failed to load service provider "
-                                                   + definition.className
+                                                   + definition.serviceImplemenation
                                                    + " for service type "
                                                    + serviceName
                                                    + " from bundle "
@@ -459,9 +383,10 @@ public class ServiceLoader<S> implements Iterable<S>
     /**
      * Retrieves a cached provider instance or creates a new instance.
      *
-     * <p>A provider stop invalidates the mediated cache. If no fresh instance
-     * exists, an inactive provider bundle is started before its provider class
-     * is loaded.</p>
+     * <p>A cached provider instance remains usable until the cache is cleared
+     * or its definition is absent from a later mediator snapshot. If no cached
+     * instance exists, an inactive provider Bundle is started before its
+     * provider class is loaded.</p>
      *
      * <p>Invalid provider declarations and instantiation failures result in a
      * {@link ServiceConfigurationError}. The mediator iterator logs that error
@@ -470,20 +395,19 @@ public class ServiceLoader<S> implements Iterable<S>
      *
      * @param definition the Provider definition.
      *
-     * @return the Provider instance.
-     *         {@code null} if the provider bundle cannot be started.
+     * @return the provider instance.
      */
     private S createProviderIfAvailable(ProviderDefinition definition)
     {
       CompletableFuture<S> providerFuture;
       boolean shouldCreateProvider = false;
-      synchronized (providerCacheLock)
+      synchronized (providerInstanceCacheLock)
         {
-          providerFuture = cachedProviders.get(definition);
+          providerFuture = providerInstanceCache.get(definition);
           if (providerFuture == null)
             {
               providerFuture = new CompletableFuture<>();
-              cachedProviders.put(definition, providerFuture);
+              providerInstanceCache.put(definition, providerFuture);
               shouldCreateProvider = true;
             }
         }
@@ -497,9 +421,8 @@ public class ServiceLoader<S> implements Iterable<S>
           // The current thread is already constructing this provider and the
           // cached future is not complete yet. Joining it here would make the
           // thread wait forever for its own provider construction to finish.
-          throw fail("Recursive creation of provider " + definition.className);
+          throw fail("Recursive creation of provider " + definition.serviceImplemenation);
         }
-
       return getProvider(providerFuture);
     }
 
@@ -510,37 +433,21 @@ public class ServiceLoader<S> implements Iterable<S>
       Set<ProviderDefinition> providerCreations = providerCreations_.get();
       if (!providerCreations.add(definition))
         {
-          providerFuture.completeExceptionally(
-              fail("Recursive creation of provider " + definition.className));
-          removeCachedProvider(definition, providerFuture);
+          providerFuture.completeExceptionally(fail("Recursive creation of provider "
+                                        + definition.serviceImplemenation));
+          removeCachedProviderInstance(definition, providerFuture);
           return;
         }
 
       try
         {
-          Bundle bundle = definition.bundleRev.getBundle();
-          if (!isProviderBundleAvailable(bundle))
-          {
-            try
-              {
-                bundle.start();
-              }
-            catch (BundleException | SecurityException | IllegalStateException e)
-              {
-                MediatorActivator.logger_.warn(
-                    "Failed to start the provider bundle", e);
-                providerFuture.complete(null);
-                removeCachedProvider(definition, providerFuture);
-                return;
-              }
-          }
           Provider<S> provider = new ProviderImpl<>(definition);
           providerFuture.complete(provider.get());
         }
       catch (Throwable e)
         {
           providerFuture.completeExceptionally(e);
-          removeCachedProvider(definition, providerFuture);
+          removeCachedProviderInstance(definition, providerFuture);
         }
       finally
         {
@@ -594,29 +501,19 @@ public class ServiceLoader<S> implements Iterable<S>
     /**
      * Returns the Provider instance prepared by {@link #hasNext()}.
      *
-     * <p>The provider generation is checked again through
-     * {@link #prepareNextProvider()}. A provider prepared before a stop,
-     * update, or removal is discarded and the current snapshot is used.</p>
+     * <p>If {@link #hasNext()} already prepared a provider, that exact
+     * instance is returned without another lifecycle check. When called
+     * directly, this method prepares the next provider first.</p>
      */
     private S nextPreparedProvider()
     {
-      if (!prepareNextProvider())
+      if (nextProvider == null && !prepareNextProvider())
         {
           throw new NoSuchElementException(" no provider any more");
         }
       S result = nextProvider;
       nextProvider = null;
       return result;
-    }
-
-    /** Returns the instance currently prepared by {@link #hasNext()}. */
-    private S getPreparedProvider()
-    {
-      if (nextProvider == null)
-        {
-          throw new IllegalStateException("No provider has been prepared");
-        }
-      return nextProvider;
     }
 
     @SuppressWarnings({ "removal", "deprecation"})
@@ -638,6 +535,7 @@ public class ServiceLoader<S> implements Iterable<S>
     }
   }
   /*--------------------------- variables -----------------------------*/
+
   /**
    * The Service Type being loaded.
    */
@@ -647,6 +545,8 @@ public class ServiceLoader<S> implements Iterable<S>
    * The fully qualified Service Type name.
    */
   private final String serviceName;
+
+  private final Bundle consumerBundle;
 
   /**
    * Java service loader used for providers visible through the ordinary Java
@@ -668,13 +568,10 @@ public class ServiceLoader<S> implements Iterable<S>
    * shared between different {@code ServiceLoader} instances, matching the
    * cache scope of {@link java.util.ServiceLoader}.</p>
    *
-   * <p>{@link #reload()} clears this cache. A provider generation change also
-   * clears it, including when a provider bundle begins stopping. Consequently,
-   * later mediated lookups create a fresh instance after starting the provider
-   * bundle when necessary. Instances already returned to consumer code remain
-   * outside the mediator's lifecycle control.</p>
+   * <p>{@link #reload()} clears this cache. Instances already returned to
+   * consumer code remain outside the mediator's lifecycle control.</p>
    */
-  private final Map<ProviderDefinition, CompletableFuture<S>> cachedProviders =
+  private final Map<ProviderDefinition, CompletableFuture<S>> providerInstanceCache =
       new HashMap<>();
 
   /**
@@ -690,12 +587,10 @@ public class ServiceLoader<S> implements Iterable<S>
   private final ThreadLocal<Set<ProviderDefinition>> providerCreations_ =
       ThreadLocal.withInitial(HashSet::new);
   /**
-   * Coordinates cache invalidation with provider-cache operations.
+   * Coordinates invalidation with provider-instance-cache operations.
    */
-  private final Object providerCacheLock = new Object();
+  private final Object providerInstanceCacheLock = new Object();
 
-  /** Provider generation represented by {@link #cachedProviders}. */
-  private long cachedProviderGeneration = Long.MIN_VALUE;
   /**
    * Access control context captured when this loader was created.
    */
@@ -703,38 +598,26 @@ public class ServiceLoader<S> implements Iterable<S>
   private final AccessControlContext acc;
 
   /*------------------------  constructors  ---------------------------*/
-
-  /**
-   * Creates a combined Java-and-mediator service loader.
-   *
-   * @param service the service type
-   * @param serviceLoader the Java service loader delegate
-   *
-   * @throws NullPointerException if {@code service} is {@code null}
-   */
-  @SuppressWarnings({ "removal", "deprecation" })
-  private ServiceLoader(Class<S> service,
-                        java.util.ServiceLoader<S> serviceLoader)
-  {
-    this(service, serviceLoader, true);
-  }
-
   /**
    * Creates a service loader with explicit mediator participation.
    *
    * @param service the service type
    * @param serviceLoader the Java service loader delegate
+   * @param consumerBundle the consumer Bundle, or {@code null} when mediation
+   *        is disabled
    * @param mediatorEnabled whether OSGi mediator providers are included
    */
   @SuppressWarnings({ "removal", "deprecation" })
   private ServiceLoader(Class<S> service,
                         java.util.ServiceLoader<S> serviceLoader,
+                        Bundle consumerBundle,
                         boolean mediatorEnabled)
   {
     this.service = Objects.requireNonNull(service, "service");
     this.serviceName = service.getName();
     this.javaDelegateServiceLoader = serviceLoader;
     this.mediatorEnabled = mediatorEnabled;
+    this.consumerBundle = consumerBundle;
     this.acc = System.getSecurityManager() == null? null
                                                    : AccessController.getContext();
   }
@@ -745,86 +628,119 @@ public class ServiceLoader<S> implements Iterable<S>
    * Creates a service loader for the specified service type.
    *
    * @param service the service type.
+   * @param callerClass the woven consumer class used to identify its bundle.
    * @param <S> the service type.
    *
    * @return a service loader.
    *
-   * @throws NullPointerException if {@code service} is {@code null}.
-   * @throws SecurityException if the consumer bundle does not have permission
-   *         to obtain the requested service
+   * @throws NullPointerException if {@code service} or {@code callerClass} is
+   *         {@code null}.
    */
-  public static <S> ServiceLoader<S> load(Class<S> service)
+  public static <S> ServiceLoader<S> load(Class<S> service,
+                                          Class<?> callerClass)
   {
     Objects.requireNonNull(service, "service");
+    Objects.requireNonNull(callerClass, "callerClass");
 
     if (MediatorActivator.activator_ == null)
       {
         System.err.println("Service Loader Mediator is unavailable; " +
                            "using the Java ServiceLoader delegate.");
+        return javaFallBackServiceLoader(service);
       }
 
-    java.util.ServiceLoader<S> javaDelegate = java.util.ServiceLoader.load(service);
-    return new ServiceLoader<>(service, javaDelegate);
+    Bundle consumerBundle = consumerBundleOf(callerClass);
+    if(consumerBundle == null)
+    {
+      return javaFallBackServiceLoader(service);
+    }
+    else
+      {
+        MediatorActivator.printDebug("Consumer bundle is " + consumerBundle.getSymbolicName());
+      }
+    return new ServiceLoader<>(service, java.util.ServiceLoader.load(service),
+            consumerBundle, true);
   }
+
 
   /**
    * Creates a service loader for the specified service type using the supplied
    * class loader.
    *
-   * <p>If the mediator is unavailable, this method delegates directly to
+   * <p>If mediation is unavailable, this method delegates discovery to
    * {@link java.util.ServiceLoader#load(Class, ClassLoader)}.</p>
    *
-   * <p>If mediation is available and {@code requestedLoader} is an OSGi bundle
-   * class loader, OSGi providers are discovered by the mediator. In that case,
-   * the Java delegate is created using
-   * {@link java.util.ServiceLoader#load(Class)}, rather than retaining the
-   * explicitly supplied bundle class loader.</p>
+   * <p>Mediation is enabled only when the woven caller passes its own bundle
+   * class loader. The Java delegate always uses {@code requestedLoader}; when
+   * another loader is supplied, the result uses ordinary Java ServiceLoader
+   * discovery only.</p>
    *
-   * <p>For a non-OSGi class loader, the supplied loader is passed unchanged to
-   * the Java ServiceLoader. A {@code null} loader is also passed through to the
-   * Java API and may therefore result in a {@link NullPointerException}.</p>
+   * <p>For a non-OSGi caller or a {@code null} requested loader, the supplied
+   * loader is passed unchanged to the Java ServiceLoader.</p>
    *
    * @param service the service type.
    * @param requestedLoader the class loader requested by the consumer, or
-   *        {@code null}.
+   *        {@code null} to use the system class loader.
+   * @param callerClass the woven consumer class used to identify its bundle.
    * @param <S> the service type.
    *
    * @return a service loader.
    *
-   * @throws NullPointerException if {@code service} or, when used by the Java
-   *         delegate, {@code requestedLoader} is {@code null}.
+   * @throws NullPointerException if {@code service} or {@code callerClass} is
+   *         {@code null}.
    */
   public static <S> ServiceLoader<S> load(Class<S> service,
-                                          ClassLoader requestedLoader)
+                                          ClassLoader requestedLoader,
+                                          Class<?> callerClass)
   {
     Objects.requireNonNull(service, "service");
-    Objects.requireNonNull(requestedLoader, "requestedLoader");
+    Objects.requireNonNull(callerClass, "callerClass");
 
-    java.util.ServiceLoader<S> javaDelegate;
+    java.util.ServiceLoader<S> javaDelegate =
+            java.util.ServiceLoader.load(service, requestedLoader);
 
     if (MediatorActivator.activator_ == null)
       {
-        System.err.println("Service Loader Mediator is unavailable; "
-            + "using the Java ServiceLoader delegate.");
-        javaDelegate = java.util.ServiceLoader.load(service, requestedLoader);
+        System.err.println("Service Loader Mediator is unavailable; " +
+                           "using the Java ServiceLoader delegate.");
+        return new ServiceLoader<S>(service, javaDelegate,
+                                    null, false);
       }
-    else if (requestedLoader instanceof BundleReference)
+    /*
+     * R11: only mediate when the caller explicitly uses its own bundle class
+     * loader. Any other loader must retain ordinary Java ServiceLoader behavior.
+     */
+    Bundle consumerBundle = consumerBundleOf(callerClass);
+    if(consumerBundle == null ||
+            (callerClass.getClassLoader() != requestedLoader))
       {
-        /*
-         * OSGi bundle providers are resolved by the mediator. Do not retain
-         * provider instances through the explicitly supplied bundle class
-         * loader.
-         */
-        javaDelegate = java.util.ServiceLoader.load(service);
+        return new ServiceLoader<S>(service, javaDelegate,
+                                    null, false);
       }
-    else
-      {
-        /* Preserve the semantics of the original Java ServiceLoader call for
-         * null and non-OSGi class loaders.
-         */
-       javaDelegate = java.util.ServiceLoader.load(service, requestedLoader);
-      }
-    return new ServiceLoader<>(service, javaDelegate);
+
+    return new ServiceLoader<>(service, javaDelegate, consumerBundle,true);
+  }
+
+  static <S> ServiceLoader<S>  javaFallBackServiceLoader(Class<S> service)
+  {
+    return new ServiceLoader<>(service, java.util.ServiceLoader.load(service),
+                               null, false);
+  }
+
+  /**
+   * Returns the consumer bundle associated with a woven caller class.
+   *
+   * <p>A normal application class loader has no associated bundle, which is
+   * valid when the proxy falls back to its Java delegate.</p>
+   *
+   * @param callerClass non-null caller class supplied by a woven bridge
+   * @return the caller's bundle, or {@code null} for a non-OSGi class loader
+   */
+  private static Bundle consumerBundleOf(Class<?> callerClass)
+  {
+    ClassLoader loader = callerClass.getClassLoader();
+    return loader instanceof BundleReference ? ((BundleReference) loader).getBundle() :
+                                               null;
   }
 
   /**
@@ -856,87 +772,68 @@ public class ServiceLoader<S> implements Iterable<S>
    *
    * @param activator the active service-loader mediator.
    *
-   * @param destination the set to clear and populate with provider definitions.
+   * @param destinations the set to clear and populate with provider definitions.
    *
-   * @return the provider generation belonging to the populated destination.
    */
-  private long getCurrentProviderDefinitions(
-      MediatorActivator activator,
-      Set<ProviderDefinition> destination)
+  private void buildProviderDefinitionSnapshot(MediatorActivator activator,
+                                               Set<ProviderDefinition> destinations)
   {
-    Objects.requireNonNull(destination, "destination");
+    Objects.requireNonNull(destinations, "destination");
 
     // Resolve the mediator snapshot before taking the local-cache lock. Bundle
     // lookup and revision adaptation may enter framework code.
-    Map<Long, List<String>> registeredProviders = new HashMap<>();
-    long currentGeneration = activator.getRegisteredProviders(serviceName,
-                                                              registeredProviders);
-    List<ProviderDefinition> definitions;
-    if (registeredProviders.isEmpty())
-      {
-        MediatorActivator.logger_.debug("no registered providers of service type " +
-                                        serviceName);
-        definitions = List.of();
-      }
-    else
-      {
-        definitions = fetchProviderDefinitions(activator, registeredProviders);
-      }
+    Map<Long, Set<String>> candidates = new LinkedHashMap<>();
 
-    Set<ProviderDefinition> definitionSet = new LinkedHashSet<>(definitions);
+    activator.getProviders(serviceName, consumerBundle, candidates);
+    List<ProviderDefinition> dfs =
+            candidates.isEmpty() ? List.of() :
+                                   fetchProviderDefinitions(activator, candidates);
 
-    synchronized (providerCacheLock)
+    Set<ProviderDefinition> visibleDefinitions = new LinkedHashSet<>(dfs);
+
+    synchronized (providerInstanceCacheLock)
       {
-        if (cachedProviderGeneration != currentGeneration)
-          {
-            cachedProviders.clear();
-            cachedProviderGeneration = currentGeneration;
-          }
-
         Set<ProviderDefinition> availableProviders = new LinkedHashSet<>();
 
-        // give the cached providers the priority to be used.
-        Iterator<ProviderDefinition> cachedProviderIterator =
-            cachedProviders.keySet().iterator();
-        while (cachedProviderIterator.hasNext())
+        // Give cached provider definitions priority in the snapshot.
+        Iterator<ProviderDefinition> cached =
+            providerInstanceCache.keySet().iterator();
+        while (cached.hasNext())
           {
-            ProviderDefinition def = cachedProviderIterator.next();
-            if (definitionSet.contains(def))
+            ProviderDefinition def = cached.next();
+            if (visibleDefinitions.contains(def))
               {
                 availableProviders.add(def);
               }
             else
               {
-                // remove the old cached definition.
-                cachedProviderIterator.remove();
+                cached.remove();
               }
           }
         MediatorActivator.printDebug("[ITERATOR] found " + availableProviders.size() + " cached services.");
-        availableProviders.addAll(definitionSet);
+        availableProviders.addAll(visibleDefinitions);
         MediatorActivator.printDebug("[ITERATOR] found " + availableProviders.size() + " services.");
-        destination.clear();
-        destination.addAll(availableProviders);
-        return currentGeneration;
+        destinations.clear();
+        destinations.addAll(availableProviders);
       }
   }
 
   /** Removes an entry only when it still represents the supplied future. */
-  private void removeCachedProvider(ProviderDefinition definition,
-                                    CompletableFuture<S> providerFuture)
+  private void removeCachedProviderInstance(ProviderDefinition definition,
+                                            CompletableFuture<S> providerFuture)
   {
-    synchronized (providerCacheLock)
+    synchronized (providerInstanceCacheLock)
       {
-        cachedProviders.remove(definition, providerFuture);
+        providerInstanceCache.remove(definition, providerFuture);
       }
   }
 
-  /** Clears the mediated provider-instance cache and its generation marker. */
-  private void clearMediatorCache()
+  /** Clears the mediated provider-instance cache. */
+  private void clearProviderInstanceCache()
   {
-    synchronized (providerCacheLock)
+    synchronized (providerInstanceCacheLock)
       {
-        cachedProviders.clear();
-        cachedProviderGeneration = Long.MIN_VALUE;
+        providerInstanceCache.clear();
       }
   }
 
@@ -954,7 +851,7 @@ public class ServiceLoader<S> implements Iterable<S>
    * @return the provider definitions visible to the consumer.
    */
   private List<ProviderDefinition> fetchProviderDefinitions(MediatorActivator activator,
-                                                            Map<Long, List<String>> registeredProviders)
+                                                            Map<Long, Set<String>> registeredProviders)
   {
     List<ProviderDefinition> result = new ArrayList<>();
     for (Long bundleId : registeredProviders.keySet())
@@ -964,10 +861,10 @@ public class ServiceLoader<S> implements Iterable<S>
           {
             BundleRevision rev = providerBundle.adapt(BundleRevision.class);
             if (rev == null)
-            {
-              continue;
-            }
-            List<String> implementationNames = registeredProviders.get(bundleId);
+              {
+                continue;
+              }
+            Set<String> implementationNames = registeredProviders.get(bundleId);
             if (implementationNames != null)
               {
                 for (String implementationName : implementationNames)
@@ -983,17 +880,17 @@ public class ServiceLoader<S> implements Iterable<S>
   }
 
   /**
-   * Loads and validates a provider implementation class through the current
-   * wiring of its provider bundle.
+   * Starts a stopped provider Bundle when necessary, then loads and validates
+   * its implementation class through the Bundle's current wiring.
    *
    * @param definition the provider definition.
    *
    * @return the provider implementation class as a subclass of the requested
    *         service type.
    *
-   * @throws ServiceConfigurationError if the provider bundle is unavailable,
-   *         has no current class loader, the class cannot be loaded, or the
-   *         class is not assignable to the requested service type
+   * @throws ServiceConfigurationError if the provider Bundle cannot be
+   *         started, has no current class loader, the class cannot be loaded,
+   *         or the class is not assignable to the requested service type
    */
   private Class<? extends S> loadProviderClass(ProviderDefinition definition)
   {
@@ -1001,7 +898,14 @@ public class ServiceLoader<S> implements Iterable<S>
 
     if (!isProviderBundleAvailable(providerBundle))
       {
-        throw fail("Provider bundle is no longer available");
+        try
+          {
+            providerBundle.start();
+          }
+        catch (BundleException | SecurityException | IllegalStateException e)
+          {
+            throw fail("Provider bundle could not be started", e);
+          }
       }
 
     ClassLoader providerLoader = getBundleClassLoader(providerBundle);
@@ -1014,25 +918,25 @@ public class ServiceLoader<S> implements Iterable<S>
     final Class<?> providerClass;
     try
       {
-        providerClass = Class.forName(definition.className,
+        providerClass = Class.forName(definition.serviceImplemenation,
                                       false,
                                       providerLoader);
         MediatorActivator.printDebug("[SERVICE_ITERATOR] got provider " + providerClass.getName());
       }
     catch (ClassNotFoundException e)
       {
-        throw fail(definition.className + " was not found", e);
+        throw fail(definition.serviceImplemenation + " was not found", e);
       }
     catch (LinkageError e)
       {
-        throw fail(definition.className + " from bundle " +
+        throw fail(definition.serviceImplemenation + " from bundle " +
                    definition.bundleRev + " could not be loaded",
                    e);
       }
 
     if (!service.isAssignableFrom(providerClass))
       {
-        throw fail("Provider " + definition.className + " from bundle " +
+        throw fail("Provider " + definition.serviceImplemenation + " from bundle " +
                    definition.bundleRev + " is not a subtype of " + serviceName);
       }
     return providerClass.asSubclass(service);
@@ -1048,7 +952,8 @@ public class ServiceLoader<S> implements Iterable<S>
    *   <li>the Java {@link java.util.ServiceLoader} delegate iterator; and</li>
    * </ol>
    *
-   * <p>If the mediator is unavailable, only Java delegate providers are returned.</p>
+   * <p>If mediation is unavailable or disabled, only Java delegate providers
+   * are returned.</p>
    *
    * @return an iterator over Java and mediator-provided provider instances
    */
@@ -1058,34 +963,23 @@ public class ServiceLoader<S> implements Iterable<S>
   {
     MediatorActivator activator = MediatorActivator.activator_;
     Iterator<S>[] iteratorArray;
-    MediatorServiceIterator osgiIterator = null;
     Iterator<S> javaIterator = javaDelegateServiceLoader.iterator();
 
-    if (!mediatorEnabled || activator == null)
+    if (activator == null || !mediatorEnabled)
       {
-        if (mediatorEnabled)
-          {
-            clearMediatorCache();
-          }
-        if (activator == null && mediatorEnabled)
-          {
-            System.err.println("Service Loader Mediator is unavailable, " +
-                               "using the Java ServiceLoader delegate.");
-          }
-        iteratorArray = new Iterator[]{javaIterator };
+        clearProviderInstanceCache();
+        iteratorArray = new Iterator[]{javaIterator};
       }
     else
       {
         Set<ProviderDefinition> definitions = new LinkedHashSet<>();
-        long providerGeneration =
-            getCurrentProviderDefinitions(activator, definitions);
+        buildProviderDefinitionSnapshot(activator, definitions);
         ProviderDefinition[] definitionArray =
             definitions.toArray(ProviderDefinition[]::new);
-        osgiIterator = new MediatorServiceIterator(definitionArray,
-                                                   providerGeneration);
-        iteratorArray = new Iterator[]{ osgiIterator, javaIterator };
+        MediatorServiceIterator osgiIterator = new MediatorServiceIterator(definitionArray);
+        iteratorArray = new Iterator[]{ osgiIterator, javaIterator};
       }
-    return new CombinedIterator(iteratorArray, osgiIterator);
+    return new CombinedIterator(iteratorArray);
   }
 
   /**
@@ -1098,7 +992,7 @@ public class ServiceLoader<S> implements Iterable<S>
   public void reload()
   {
     javaDelegateServiceLoader.reload();
-    clearMediatorCache();
+    clearProviderInstanceCache();
   }
 
   /**
@@ -1118,29 +1012,6 @@ public class ServiceLoader<S> implements Iterable<S>
       {
         return Optional.empty();
       }
-  }
-
-  /**
-   * Creates a Java-only service loader using the system class loader.
-   *
-   * <p>This method deliberately bypasses the OSGi mediator. A newly created
-   * {@code ServiceLoader} has no cached OSGi provider instances, and
-   * {@code loadInstalled} must not populate that cache from the mediator's
-   * global provider registry. It therefore delegates only to
-   * {@link java.util.ServiceLoader} with the system class loader and returns
-   * Java-installed providers only.</p>
-   *
-   * @param service service type
-   * @param <S> service type
-   * @return a service loader
-   */
-  public static <S> ServiceLoader<S> loadInstalled(Class<S> service)
-  {
-    Objects.requireNonNull(service, "service");
-
-    java.util.ServiceLoader<S> javaDelegate =
-        java.util.ServiceLoader.load(service, ClassLoader.getSystemClassLoader());
-    return new ServiceLoader<>(service, javaDelegate, false);
   }
 
   /**
@@ -1170,7 +1041,10 @@ public class ServiceLoader<S> implements Iterable<S>
     return new ServiceConfigurationError(serviceName + ": " + message,  cause);
   }
   /**
-   * Creates a service-configuration error for this loader's service type.
+   * Returns the class loader for the Bundle's current wiring.
+   *
+   * @param bundle the Bundle whose wiring supplies the class loader
+   * @return the Bundle class loader, or {@code null} if no wiring is available
    */
   private static ClassLoader getBundleClassLoader(Bundle bundle)
   {

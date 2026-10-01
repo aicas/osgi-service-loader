@@ -5,13 +5,17 @@
 
 package com.aicas.osgi.spi.weaver;
 
-import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.Test;
 import org.objectweb.asm.ClassReader;
@@ -22,6 +26,7 @@ import org.objectweb.asm.Handle;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
+import org.objectweb.asm.util.CheckClassAdapter;
 
 /**
  * Unit tests for {@link ServiceLoaderWeaver}.
@@ -34,8 +39,10 @@ import org.objectweb.asm.Type;
  * <p>The tests cover the following weaving rules:</p>
  *
  * <ul>
- *   <li>Supported {@code java.util.ServiceLoader} calls are rewritten to
- *       {@code com.aicas.osgi.spi.proxy.ServiceLoader}.</li>
+ *   <li>Supported {@code load} calls and method handles are redirected to
+ *       generated bridge methods in the woven class; each bridge forwards to
+ *       {@code com.aicas.osgi.spi.proxy.ServiceLoader} with that class as the
+ *       caller argument.</li>
  *   <li>Only the configured {@code INVOKESTATIC} and
  *       {@code INVOKEVIRTUAL} method invocations are accepted.</li>
  *   <li>An unsupported ServiceLoader invocation rejects the transformation of
@@ -73,43 +80,121 @@ public class ServiceLoaderWeaverTest
    * <p>The expected woven invocation is:</p>
    *
    * <pre>
-   * INVOKESTATIC com/aicas/osgi/spi/proxy/ServiceLoader.load
+   * INVOKESTATIC test/GeneratedConsumer.serviceLoaderBridge$load
    *   (Ljava/lang/Class;)Lcom/aicas/osgi/spi/proxy/ServiceLoader;
    * </pre>
    */
   @Test
   public void weavesLoadWithServiceClass()
   {
-    byte[] originalBytes =
-      createClass(new MethodBody()
-                  {
-                    @Override
-                    public void accept(MethodVisitor method)
-                    {
-                      method.visitLdcInsn(Type.getType(Runnable.class));
+    byte[] originalBytes = createClass(new MethodBody()
+    {
+      @Override
+      public void accept(MethodVisitor method)
+      {
+        method.visitLdcInsn(Type.getType(Runnable.class));
 
-                      method.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                             ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                                             "load",
-                                             "(Ljava/lang/Class;)Ljava/util/ServiceLoader;",
-                                             false);
+        method.visitMethodInsn(Opcodes.INVOKESTATIC,
+                               ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
+                               "load",
+                               ServiceLoaderWeaver.JAVA_LOAD_DESCRIPTOR,
+                               false);
 
-                      method.visitInsn(Opcodes.POP);
-                    }
-                  });
+        method.visitInsn(Opcodes.POP);
+      }
+    });
 
     ServiceLoaderWeaver.WeavingResult result =
       ServiceLoaderWeaver.weave(originalBytes);
 
     assertTrue(result.isSuccess());
+    assertEquals(ServiceLoaderWeaver.WeavingResult.Status.WOVEN,
+                 result.getStatus());
 
     assertInvocationExists(result.getBytes(),
                            Opcodes.INVOKESTATIC,
-                           ServiceLoaderWeaver.OSGI_SERVICE_LOADER,
-                           "load",
-                           "(Ljava/lang/Class;)" + ServiceLoaderWeaver.OSGI_SERVICE_LOADER_DESCRIPTOR);
+                           "test/GeneratedConsumer",
+                           ServiceLoaderWeaver.BRIDGE_LOAD_NAME,
+                           ServiceLoaderWeaver.OSGI_LOAD_DESCRIPTOR);
+    assertBridgeForwardsToProxy(result.getBytes(),
+                                "test/GeneratedConsumer",
+                                ServiceLoaderWeaver.BRIDGE_LOAD_NAME,
+                                ServiceLoaderWeaver.OSGI_LOAD_DESCRIPTOR,
+                                ServiceLoaderWeaver.OSGI_BRIDGE_LOAD_DESCRIPTOR);
 
     assertNoReferenceToJavaServiceLoader(result.getBytes());
+  }
+
+  /**
+   * Verifies that the generated bridge links at runtime and forwards the
+   * woven class, rather than merely having the expected instructions.
+   */
+  @Test
+  public void wovenClassLinksAndForwardsItsCallerClass() throws Exception
+  {
+    byte[] originalBytes = createClass(new MethodBody()
+    {
+      @Override
+      public void accept(MethodVisitor method)
+      {
+        emitLoad(method);
+        method.visitInsn(Opcodes.POP);
+      }
+    });
+    ServiceLoaderWeaver.WeavingResult result =
+      ServiceLoaderWeaver.weave(originalBytes);
+
+    assertTrue(result.isSuccess());
+    ByteArrayClassLoader loader = new ByteArrayClassLoader(Map.of(
+        "test.GeneratedConsumer", result.getBytes(),
+        ServiceLoaderWeaver.OSGI_SERVICE_LOADER.replace('/', '.'),
+        createProxyServiceLoaderStub()));
+    Class<?> consumer = loader.loadClass("test.GeneratedConsumer");
+    consumer.getMethod("consume").invoke(null);
+
+    Class<?> proxy = loader.loadClass(ServiceLoaderWeaver.OSGI_SERVICE_LOADER.replace('/', '.'));
+    assertSame(consumer, proxy.getField("lastCaller").get(null));
+  }
+
+  /**
+   * Verifies that weaving preserves valid stack-map frames when control-flow
+   * paths containing a ServiceLoader value and another reference type merge.
+   *
+   * <p>Recomputing frames inside the production weaver would require ASM to
+   * resolve the remapped proxy ServiceLoader through the weaver's class loader.
+   * That type is not necessarily visible there in OSGi. Preserving the original
+   * frames and computing only maximum stack/local sizes avoids that lookup.</p>
+   */
+  @Test
+  public void preservesFramesAcrossServiceLoaderControlFlowMerge()
+      throws Exception
+  {
+    byte[] originalBytes = createClassWithServiceLoaderControlFlowMerge();
+
+    ServiceLoaderWeaver.WeavingResult result =
+        ServiceLoaderWeaver.weave(originalBytes);
+
+    assertEquals(ServiceLoaderWeaver.WeavingResult.Status.WOVEN,
+                 result.getStatus());
+    assertFalse("Weaving returned unchanged class bytes",
+                Arrays.equals(originalBytes, result.getBytes()));
+
+    ByteArrayClassLoader loader = new ByteArrayClassLoader(Map.of(
+        "test.GeneratedMergingConsumer", result.getBytes(),
+        ServiceLoaderWeaver.OSGI_SERVICE_LOADER.replace('/', '.'),
+        createProxyServiceLoaderStub()));
+
+    assertValidClass(result.getBytes(), loader);
+
+    Class<?> consumer = loader.loadClass("test.GeneratedMergingConsumer");
+    Object proxyResult = consumer.getMethod("select", boolean.class)
+        .invoke(null, true);
+    Object fallbackResult = consumer.getMethod("select", boolean.class)
+        .invoke(null, false);
+
+    assertEquals(ServiceLoaderWeaver.OSGI_SERVICE_LOADER.replace('/', '.'),
+                 proxyResult.getClass().getName());
+    assertEquals("fallback", fallbackResult);
   }
 
   /**
@@ -124,9 +209,9 @@ public class ServiceLoaderWeaverTest
    *         classLoader);
    * }</pre>
    *
-   * <p>Both the invocation owner and the return type in the descriptor must be
-   * changed to {@code com/aicas/osgi/spi/proxy/ServiceLoader}. The ClassLoader argument remains
-   * unchanged.</p>
+   * <p>The woven call targets the generated two-argument bridge. The bridge
+   * retains the service and class-loader arguments, then supplies the woven
+   * class literal to the three-argument proxy overload.</p>
    */
   @Test
   public void weavesLoadWithExplicitClassLoader()
@@ -143,8 +228,7 @@ public class ServiceLoaderWeaverTest
                       method.visitMethodInsn(Opcodes.INVOKESTATIC,
                                              ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
                                              "load",
-                                             "(Ljava/lang/Class;Ljava/lang/ClassLoader;)" +
-                                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER_DESCRIPTOR,
+                                             ServiceLoaderWeaver.JAVA_LOAD_WITH_LOADER_DESCRIPTOR,
                                              false);
 
                       method.visitInsn(Opcodes.POP);
@@ -158,10 +242,14 @@ public class ServiceLoaderWeaverTest
 
     assertInvocationExists(result.getBytes(),
                            Opcodes.INVOKESTATIC,
-                           ServiceLoaderWeaver.OSGI_SERVICE_LOADER,
-                           "load",
-                           "(Ljava/lang/Class;Ljava/lang/ClassLoader;)" +
-                           ServiceLoaderWeaver.OSGI_SERVICE_LOADER_DESCRIPTOR);
+                           "test/GeneratedConsumer",
+                           ServiceLoaderWeaver.BRIDGE_LOAD_NAME,
+                           ServiceLoaderWeaver.OSGI_LOAD_WITH_LOADER_DESCRIPTOR);
+    assertBridgeForwardsToProxy(result.getBytes(),
+                                "test/GeneratedConsumer",
+                                ServiceLoaderWeaver.BRIDGE_LOAD_NAME,
+                                ServiceLoaderWeaver.OSGI_LOAD_WITH_LOADER_DESCRIPTOR,
+                                ServiceLoaderWeaver.OSGI_BRIDGE_LOAD_WITH_LOADER_DESCRIPTOR);
 
     assertNoReferenceToJavaServiceLoader(result.getBytes());
   }
@@ -175,29 +263,30 @@ public class ServiceLoaderWeaverTest
    *     java.util.ServiceLoader.load(Runnable.class).iterator();
    * }</pre>
    *
-   * <p>The load invocation and the iterator invocation must both use
-   * {@code com/aicas/osgi/spi/proxy/ServiceLoader} as their owner after weaving.</p>
+   * <p>The load invocation targets the generated bridge. The iterator
+   * invocation remains a direct call on
+   * {@code com.aicas.osgi.spi.proxy.ServiceLoader}.</p>
    */
   @Test
   public void weavesIterator()
   {
     byte[] originalBytes =
       createClass(new MethodBody()
-                  {
-                    @Override
-                    public void accept(MethodVisitor method)
-                    {
-                      emitLoad(method);
+      {
+        @Override
+        public void accept(MethodVisitor method)
+        {
+          emitLoad(method);
 
-                      method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-                                             ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                                             "iterator",
-                                             "()Ljava/util/Iterator;",
-                                             false);
+          method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
+                                 "iterator",
+                                 "()Ljava/util/Iterator;",
+                                 false);
 
-                      method.visitInsn(Opcodes.POP);
-                    }
-                  });
+          method.visitInsn(Opcodes.POP);
+        }
+      });
 
     ServiceLoaderWeaver.WeavingResult result =
       ServiceLoaderWeaver.weave(originalBytes);
@@ -233,19 +322,19 @@ public class ServiceLoaderWeaverTest
   {
     byte[] originalBytes =
       createClass(new MethodBody()
-                  {
-                    @Override
-                    public void accept(MethodVisitor method)
-                    {
-                      emitLoad(method);
+      {
+        @Override
+        public void accept(MethodVisitor method)
+        {
+          emitLoad(method);
 
-                      method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-                                             ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                                             "reload",
-                                             "()V",
-                                             false);
-                    }
-                  });
+          method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
+                                 "reload",
+                                 "()V",
+                                 false);
+        }
+      });
 
     ServiceLoaderWeaver.WeavingResult result =
       ServiceLoaderWeaver.weave(originalBytes);
@@ -279,21 +368,21 @@ public class ServiceLoaderWeaverTest
   {
     byte[] originalBytes =
       createClass(new MethodBody()
-                  {
-                    @Override
-                    public void accept(MethodVisitor method)
-                    {
-                      emitLoad(method);
+      {
+        @Override
+        public void accept(MethodVisitor method)
+        {
+          emitLoad(method);
 
-                      method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-                                             ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                                             "findFirst",
-                                             "()Ljava/util/Optional;",
-                                             false);
+          method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
+                                 "findFirst",
+                                 "()Ljava/util/Optional;",
+                                 false);
 
-                      method.visitInsn(Opcodes.POP);
-                    }
-                  });
+          method.visitInsn(Opcodes.POP);
+        }
+      });
 
     ServiceLoaderWeaver.WeavingResult result =
       ServiceLoaderWeaver.weave(originalBytes);
@@ -362,8 +451,8 @@ public class ServiceLoaderWeaverTest
    * {@code ServiceLoader.load(Class)}.
    *
    * <p>The method handle is represented by an {@code LDC} constant rather
-   * than an ordinary invocation instruction. The handle owner and return type
-   * descriptor must still be remapped.</p>
+   * than an ordinary invocation instruction. It is retargeted to the
+   * generated bridge so its functional signature remains unchanged.</p>
    */
   @Test
   public void weavesStaticServiceLoaderMethodReference()
@@ -377,8 +466,7 @@ public class ServiceLoaderWeaverTest
           method.visitLdcInsn(new Handle(Opcodes.H_INVOKESTATIC,
                                          ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
                                          "load",
-                                         "(Ljava/lang/Class;)" +
-                                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER_DESCRIPTOR,
+                                         ServiceLoaderWeaver.JAVA_LOAD_DESCRIPTOR,
                                          false));
           method.visitInsn(Opcodes.POP);
         }
@@ -388,12 +476,95 @@ public class ServiceLoaderWeaverTest
       ServiceLoaderWeaver.weave(originalBytes);
 
     assertTrue(result.isSuccess());
+    assertMethodHandleExists(result.getBytes(),
+                             Opcodes.H_INVOKESTATIC,
+                             "test/GeneratedConsumer",
+                             ServiceLoaderWeaver.BRIDGE_LOAD_NAME,
+                             ServiceLoaderWeaver.OSGI_LOAD_DESCRIPTOR);
     assertNoReferenceToJavaServiceLoader(result.getBytes());
   }
 
   /**
-   * Verifies that a method reference to unsupported {@code stream()} prevents
-   * weaving, just like an ordinary {@code stream()} invocation.
+   * Verifies bridge retargeting of the implementation handle in a
+   * LambdaMetafactory bootstrap argument.
+   *
+   * <p>The generated {@code invokedynamic} instruction models a
+   * {@code ServiceLoader::load} method reference. Its bootstrap implementation
+   * handle must be redirected to the generated bridge while the lambda's
+   * functional signature remains unchanged.</p>
+   */
+  @Test
+  public void weavesInvokeDynamicServiceLoaderMethodReference()
+  {
+    byte[] originalBytes = createClass(new MethodBody()
+    {
+      @Override
+      public void accept(MethodVisitor method)
+      {
+        Handle metafactory = new Handle(
+            Opcodes.H_INVOKESTATIC,
+            "java/lang/invoke/LambdaMetafactory",
+            "metafactory",
+            "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;" +
+                "Ljava/lang/invoke/MethodType;Ljava/lang/invoke/MethodType;" +
+                "Ljava/lang/invoke/MethodHandle;Ljava/lang/invoke/MethodType;)" +
+                "Ljava/lang/invoke/CallSite;",
+            false);
+        method.visitInvokeDynamicInsn(
+            "apply",
+            "()Ljava/util/function/Function;",
+            metafactory,
+            Type.getMethodType("(Ljava/lang/Object;)Ljava/lang/Object;"),
+            new Handle(Opcodes.H_INVOKESTATIC,
+                       ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
+                       "load",
+                       ServiceLoaderWeaver.JAVA_LOAD_DESCRIPTOR,
+                       false),
+            Type.getMethodType(ServiceLoaderWeaver.JAVA_LOAD_DESCRIPTOR));
+        method.visitInsn(Opcodes.POP);
+      }
+    });
+
+    ServiceLoaderWeaver.WeavingResult result =
+      ServiceLoaderWeaver.weave(originalBytes);
+
+    assertTrue(result.isSuccess());
+    assertInvokeDynamicMethodHandleExists(result.getBytes(),
+                                          Opcodes.H_INVOKESTATIC,
+                                          "test/GeneratedConsumer",
+                                          ServiceLoaderWeaver.BRIDGE_LOAD_NAME,
+                                          ServiceLoaderWeaver.OSGI_LOAD_DESCRIPTOR);
+    assertNoReferenceToJavaServiceLoader(result.getBytes());
+  }
+
+  /**
+   * Verifies that a generated bridge receives a suffixed name after remapping
+   * would otherwise make its descriptor collide with a user-declared method.
+   *
+   * <p>The fixture declares {@code serviceLoaderBridge$load} with the JDK
+   * ServiceLoader return descriptor. ClassRemapper changes that return type to
+   * the proxy ServiceLoader descriptor, which is the descriptor required by the
+   * generated bridge.</p>
+   */
+  @Test
+  public void suffixesBridgeNameWhenTheClassAlreadyDeclaresIt()
+  {
+    byte[] originalBytes = createClassWithBridgeNameCollision();
+
+    ServiceLoaderWeaver.WeavingResult result =
+      ServiceLoaderWeaver.weave(originalBytes);
+
+    assertTrue(result.isSuccess());
+    assertInvocationExists(result.getBytes(),
+                           Opcodes.INVOKESTATIC,
+                           "test/GeneratedConsumer",
+                           ServiceLoaderWeaver.BRIDGE_LOAD_NAME + "$1",
+                           ServiceLoaderWeaver.OSGI_LOAD_DESCRIPTOR);
+  }
+
+  /**
+   * Verifies that an LDC method handle targeting unsupported {@code stream()}
+   * prevents weaving, just like an ordinary {@code stream()} invocation.
    */
   @Test
   public void rejectsUnsupportedStreamMethodReference()
@@ -417,6 +588,8 @@ public class ServiceLoaderWeaverTest
       ServiceLoaderWeaver.weave(originalBytes);
 
     assertFalse(result.isSuccess());
+    assertEquals(ServiceLoaderWeaver.WeavingResult.Status.UNSUPPORTED_INVOCATION,
+                 result.getStatus());
     assertSame(originalBytes, result.getBytes());
   }
 
@@ -458,13 +631,6 @@ public class ServiceLoaderWeaverTest
 
     assertFalse(result.isSuccess());
     assertSame(originalBytes, result.getBytes());
-    assertArrayEquals(originalBytes, result.getBytes());
-
-    assertInvocationExists(result.getBytes(),
-                           Opcodes.INVOKEVIRTUAL,
-                           ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                           "stream",
-                           "()Ljava/util/stream/Stream;");
   }
 
   /**
@@ -494,28 +660,30 @@ public class ServiceLoaderWeaverTest
   {
     byte[] originalBytes =
       createClass(new MethodBody()
-                  {
-                    @Override
-                    public void accept(MethodVisitor method)
-                    {
-                      method.visitInsn(Opcodes.ACONST_NULL);
-                      method.visitLdcInsn(Type.getType(Runnable.class));
+      {
+        @Override
+        public void accept(MethodVisitor method)
+        {
+          method.visitInsn(Opcodes.ACONST_NULL);
+          method.visitLdcInsn(Type.getType(Runnable.class));
 
-                      method.visitMethodInsn(Opcodes.INVOKESTATIC,
-                                             ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                                             "load",
-                                             "(Ljava/lang/ModuleLayer;Ljava/lang/Class;)" +
-                                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER_DESCRIPTOR,
-                                             false);
+          method.visitMethodInsn(Opcodes.INVOKESTATIC,
+                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
+                                 "load",
+                                 "(Ljava/lang/ModuleLayer;Ljava/lang/Class;)" +
+                                         ServiceLoaderWeaver.JAVA_SERVICE_LOADER_DESCRIPTOR,
+                                 false);
 
-                      method.visitInsn(Opcodes.POP);
-                    }
-                  });
+          method.visitInsn(Opcodes.POP);
+        }
+      });
 
     ServiceLoaderWeaver.WeavingResult result =
       ServiceLoaderWeaver.weave(originalBytes);
 
     assertFalse(result.isSuccess());
+    assertEquals(ServiceLoaderWeaver.WeavingResult.Status.UNSUPPORTED_INVOCATION,
+                 result.getStatus());
     assertSame(originalBytes, result.getBytes());
   }
 
@@ -536,42 +704,30 @@ public class ServiceLoaderWeaverTest
   {
     byte[] originalBytes =
       createClass(new MethodBody()
-                  {
-                    @Override
-                    public void accept(MethodVisitor method)
-                    {
-                      emitLoad(method);
-                      method.visitInsn(Opcodes.POP);
+      {
+        @Override
+        public void accept(MethodVisitor method)
+        {
+          emitLoad(method);
+          method.visitInsn(Opcodes.POP);
 
-                      emitLoad(method);
+          emitLoad(method);
 
-                      method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
-                                             ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                                             "stream",
-                                             "()Ljava/util/stream/Stream;",
-                                             false);
+          method.visitMethodInsn(Opcodes.INVOKEVIRTUAL,
+                                 ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
+                                 "stream",
+                                 "()Ljava/util/stream/Stream;",
+                                 false);
 
-                      method.visitInsn(Opcodes.POP);
-                    }
-                  });
+          method.visitInsn(Opcodes.POP);
+        }
+      });
 
     ServiceLoaderWeaver.WeavingResult result =
       ServiceLoaderWeaver.weave(originalBytes);
 
     assertFalse(result.isSuccess());
     assertSame(originalBytes, result.getBytes());
-
-    assertInvocationExists(result.getBytes(),
-                           Opcodes.INVOKESTATIC,
-                           ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
-                           "load",
-                           "(Ljava/lang/Class;)Ljava/util/ServiceLoader;");
-
-    assertNoInvocationExists(result.getBytes(),
-                             Opcodes.INVOKESTATIC,
-                             ServiceLoaderWeaver.OSGI_SERVICE_LOADER,
-                             "load",
-                             "(Ljava/lang/Class;)"+ ServiceLoaderWeaver.OSGI_SERVICE_LOADER_DESCRIPTOR);
   }
 
   /**
@@ -589,19 +745,21 @@ public class ServiceLoaderWeaverTest
   {
     byte[] originalBytes =
       createClass(new MethodBody()
-                  {
-                    @Override
-                    public void accept(MethodVisitor method)
-                    {
-                      method.visitLdcInsn("nothing to weave");
-                      method.visitInsn(Opcodes.POP);
-                    }
-                  });
+      {
+        @Override
+        public void accept(MethodVisitor method)
+        {
+          method.visitLdcInsn("nothing to weave");
+          method.visitInsn(Opcodes.POP);
+        }
+      });
 
     ServiceLoaderWeaver.WeavingResult result =
       ServiceLoaderWeaver.weave(originalBytes);
 
     assertFalse(result.isSuccess());
+    assertEquals(ServiceLoaderWeaver.WeavingResult.Status.NO_SUPPORTED_INVOCATION,
+                 result.getStatus());
     assertSame(originalBytes, result.getBytes());
   }
 
@@ -634,7 +792,9 @@ public class ServiceLoaderWeaverTest
    * Lcom/aicas/osgi/spi/proxy/ServiceLoader;
    * </pre>
    *
-   * <p>The generic field signature must also be remapped by ClassRemapper.</p>
+   * <p>The fixture includes a generic field signature so that the generated
+   * class represents an ordinary parameterized ServiceLoader field. This test
+   * asserts the remapped field descriptor.</p>
    */
   @Test
   public void remapsFieldDescriptorWhenSupportedInvocationExists()
@@ -700,6 +860,8 @@ public class ServiceLoaderWeaverTest
       ServiceLoaderWeaver.weave(invalidBytes);
 
     assertFalse(result.isSuccess());
+    assertEquals(ServiceLoaderWeaver.WeavingResult.Status.TRANSFORMATION_ERROR,
+                 result.getStatus());
     assertSame(invalidBytes, result.getBytes());
   }
 
@@ -723,7 +885,7 @@ public class ServiceLoaderWeaverTest
     method.visitMethodInsn(Opcodes.INVOKESTATIC,
                            ServiceLoaderWeaver.JAVA_SERVICE_LOADER,
                            "load",
-                           "(Ljava/lang/Class;)Ljava/util/ServiceLoader;",
+                           ServiceLoaderWeaver.JAVA_LOAD_DESCRIPTOR,
                            false);
   }
 
@@ -776,6 +938,75 @@ public class ServiceLoaderWeaverTest
     return writer.toByteArray();
   }
 
+  /**
+   * Generates a class containing a control-flow merge between a ServiceLoader
+   * result and a String result.
+   *
+   * <p>The generated method is equivalent to:</p>
+   *
+   * <pre>{@code
+   * public static Object select(boolean useServiceLoader) {
+   *   if (useServiceLoader) {
+   *     return ServiceLoader.load(Runnable.class);
+   *   }
+   *   return "fallback";
+   * }
+   * }</pre>
+   *
+   * @return generated class bytes containing computed stack-map frames
+   */
+  private static byte[] createClassWithServiceLoaderControlFlowMerge()
+  {
+    ClassWriter writer =
+        new ClassWriter(ClassWriter.COMPUTE_MAXS |
+                        ClassWriter.COMPUTE_FRAMES);
+
+    writer.visit(Opcodes.V17,
+                 Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER,
+                 "test/GeneratedMergingConsumer",
+                 null,
+                 "java/lang/Object",
+                 null);
+
+    addDefaultConstructor(writer);
+
+    MethodVisitor method =
+        writer.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                           "select",
+                           "(Z)Ljava/lang/Object;",
+                           null,
+                           null);
+
+    org.objectweb.asm.Label fallback = new org.objectweb.asm.Label();
+    org.objectweb.asm.Label merge = new org.objectweb.asm.Label();
+
+    method.visitCode();
+    method.visitVarInsn(Opcodes.ILOAD, 0);
+    method.visitJumpInsn(Opcodes.IFEQ, fallback);
+
+    emitLoad(method);
+    method.visitJumpInsn(Opcodes.GOTO, merge);
+
+    method.visitLabel(fallback);
+    method.visitLdcInsn("fallback");
+
+    method.visitLabel(merge);
+    method.visitInsn(Opcodes.ARETURN);
+    method.visitMaxs(0, 0);
+    method.visitEnd();
+
+    writer.visitEnd();
+    return writer.toByteArray();
+  }
+
+  /**
+   * Generates a class with a parameterized JDK ServiceLoader field and,
+   * optionally, a supported {@code load(Class)} invocation.
+   *
+   * @param includeSupportedInvocation whether to add a {@code consume()} method
+   *        containing a supported load call
+   * @return generated JVM class-file bytes
+   */
   private static byte[] createClassWithServiceLoaderField(boolean includeSupportedInvocation)
   {
     ClassWriter writer =
@@ -820,6 +1051,131 @@ public class ServiceLoaderWeaverTest
     return writer.toByteArray();
   }
 
+  /**
+   * Generates a consumer that already declares the preferred bridge name.
+   *
+   * <p>The declared method uses the JDK load descriptor. Type remapping changes
+   * it to the proxy descriptor, forcing the weaver to allocate a suffixed
+   * bridge name.</p>
+   *
+   * @return generated JVM class-file bytes
+   */
+  private static byte[] createClassWithBridgeNameCollision()
+  {
+    ClassWriter writer =
+      new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
+
+    writer.visit(Opcodes.V17,
+                 Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER,
+                 "test/GeneratedConsumer",
+                 null,
+                 "java/lang/Object",
+                 null);
+    addDefaultConstructor(writer);
+
+    MethodVisitor existingBridge = writer.visitMethod(
+        Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC,
+        ServiceLoaderWeaver.BRIDGE_LOAD_NAME,
+        ServiceLoaderWeaver.JAVA_LOAD_DESCRIPTOR,
+        null,
+        null);
+    existingBridge.visitCode();
+    existingBridge.visitInsn(Opcodes.ACONST_NULL);
+    existingBridge.visitInsn(Opcodes.ARETURN);
+    existingBridge.visitMaxs(0, 0);
+    existingBridge.visitEnd();
+
+    MethodVisitor consumer = writer.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                                                "consume",
+                                                "()V",
+                                                null,
+                                                null);
+    consumer.visitCode();
+    emitLoad(consumer);
+    consumer.visitInsn(Opcodes.POP);
+    consumer.visitInsn(Opcodes.RETURN);
+    consumer.visitMaxs(0, 0);
+    consumer.visitEnd();
+
+    writer.visitEnd();
+    return writer.toByteArray();
+  }
+
+  /**
+   * Generates a minimal proxy ServiceLoader implementation for linkage tests.
+   *
+   * <p>Its {@code load} methods record the caller-class argument in
+   * {@code lastCaller} and return a new stub instance.</p>
+   *
+   * @return generated JVM class-file bytes
+   */
+  private static byte[] createProxyServiceLoaderStub()
+  {
+    ClassWriter writer =
+      new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
+    writer.visit(Opcodes.V17,
+                 Opcodes.ACC_PUBLIC | Opcodes.ACC_SUPER,
+                 ServiceLoaderWeaver.OSGI_SERVICE_LOADER,
+                 null,
+                 "java/lang/Object",
+                 null);
+    writer.visitField(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                      "lastCaller",
+                      "Ljava/lang/Class;",
+                      null,
+                      null).visitEnd();
+    addDefaultConstructor(writer);
+    addProxyLoadStub(writer,
+                     ServiceLoaderWeaver.OSGI_BRIDGE_LOAD_DESCRIPTOR,
+                     1);
+    addProxyLoadStub(writer,
+                     ServiceLoaderWeaver.OSGI_BRIDGE_LOAD_WITH_LOADER_DESCRIPTOR,
+                     2);
+    writer.visitEnd();
+    return writer.toByteArray();
+  }
+
+  /**
+   * Adds one static proxy {@code load} stub that records its caller-class
+   * argument.
+   *
+   * @param writer class writer receiving the method
+   * @param descriptor proxy load method descriptor
+   * @param callerArgument local-variable index of the caller-class argument
+   */
+  private static void addProxyLoadStub(ClassWriter writer,
+                                       String descriptor,
+                                       int callerArgument)
+  {
+    MethodVisitor method = writer.visitMethod(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC,
+                                              "load",
+                                              descriptor,
+                                              null,
+                                              null);
+    method.visitCode();
+    method.visitVarInsn(Opcodes.ALOAD, callerArgument);
+    method.visitFieldInsn(Opcodes.PUTSTATIC,
+                          ServiceLoaderWeaver.OSGI_SERVICE_LOADER,
+                          "lastCaller",
+                          "Ljava/lang/Class;");
+    method.visitTypeInsn(Opcodes.NEW, ServiceLoaderWeaver.OSGI_SERVICE_LOADER);
+    method.visitInsn(Opcodes.DUP);
+    method.visitMethodInsn(Opcodes.INVOKESPECIAL,
+                           ServiceLoaderWeaver.OSGI_SERVICE_LOADER,
+                           "<init>",
+                           "()V",
+                           false);
+    method.visitInsn(Opcodes.ARETURN);
+    method.visitMaxs(0, 0);
+    method.visitEnd();
+  }
+
+  /**
+   * Adds a public no-argument constructor that invokes {@link Object}'s
+   * constructor.
+   *
+   * @param writer class writer receiving the constructor
+   */
   private static void addDefaultConstructor(ClassWriter writer)
   {
     MethodVisitor constructor =
@@ -843,6 +1199,79 @@ public class ServiceLoaderWeaverTest
     constructor.visitEnd();
   }
 
+  /**
+   * Defines a fixed set of generated classes from in-memory byte arrays.
+   *
+   * <p>The loader delegates all classes outside that set to the test class's
+   * defining loader.</p>
+   */
+  private static final class ByteArrayClassLoader extends ClassLoader
+  {
+    private final Map<String, byte[]> classes;
+
+    /**
+     * @param classes binary names mapped to their class-file bytes
+     */
+    private ByteArrayClassLoader(Map<String, byte[]> classes)
+    {
+      super(ServiceLoaderWeaverTest.class.getClassLoader());
+      this.classes = classes;
+    }
+
+    /**
+     * Defines a generated class when its binary name is in the configured map.
+     *
+     * @param name binary class name
+     * @return the defined class
+     * @throws ClassNotFoundException when no bytes are configured for
+     *         {@code name}
+     */
+    @Override
+    protected Class<?> findClass(String name) throws ClassNotFoundException
+    {
+      byte[] bytes = classes.get(name);
+      if (bytes == null)
+        {
+          throw new ClassNotFoundException(name);
+        }
+      return defineClass(name, bytes, 0, bytes.length);
+    }
+  }
+
+  /**
+   * Uses ASM's data-flow verifier with a loader that can resolve both the woven
+   * consumer and the generated proxy ServiceLoader stub.
+   *
+   * @param bytes transformed class bytes
+   * @param loader loader providing transformed-class dependencies
+   */
+  private static void assertValidClass(byte[] bytes,
+                                       ClassLoader loader)
+  {
+    StringWriter diagnostics = new StringWriter();
+    PrintWriter output = new PrintWriter(diagnostics);
+
+    CheckClassAdapter.verify(new ClassReader(bytes),
+                             loader,
+                             false,
+                             output);
+    output.flush();
+
+    assertEquals("ASM verification failed:\n" + diagnostics,
+                 "",
+                 diagnostics.toString().trim());
+  }
+
+  /**
+   * Verifies that a generated class contains an ordinary invocation with the
+   * specified JVM instruction details.
+   *
+   * @param bytes class-file bytes to inspect
+   * @param expectedOpcode expected invocation opcode
+   * @param expectedOwner expected internal owner name
+   * @param expectedName expected method name
+   * @param expectedDescriptor expected method descriptor
+   */
   private static void assertInvocationExists(byte[] bytes,
                                              int expectedOpcode,
                                              String expectedOwner,
@@ -860,23 +1289,174 @@ public class ServiceLoaderWeaverTest
                invocations.contains(expected));
   }
 
-  private static void assertNoInvocationExists(byte[] bytes,
-                                               int opcode,
-                                               String owner,
-                                               String name,
-                                               String descriptor)
+  /**
+   * Verifies a generated bridge's modifiers, caller-class literal, and proxy
+   * {@code load} invocation.
+   *
+   * @param bytes class-file bytes to inspect
+   * @param className internal name of the woven class
+   * @param bridgeName generated bridge method name
+   * @param bridgeDescriptor generated bridge descriptor
+   * @param proxyDescriptor proxy load descriptor
+   */
+  private static void assertBridgeForwardsToProxy(byte[] bytes,
+                                                  String className,
+                                                  String bridgeName,
+                                                  String bridgeDescriptor,
+                                                  String proxyDescriptor)
   {
-    List<Invocation> invocations = readInvocations(bytes);
+    final boolean[] hasClassLiteral = { false };
+    final boolean[] forwardsToProxy = { false };
 
-    Invocation unexpected =
-      new Invocation(opcode,
-                     owner,
-                     name,
-                     descriptor);
+    new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9)
+    {
+      @Override
+      public MethodVisitor visitMethod(int access,
+                                       String name,
+                                       String descriptor,
+                                       String signature,
+                                       String[] exceptions)
+      {
+        if (!bridgeName.equals(name) ||
+            !bridgeDescriptor.equals(descriptor))
+          {
+            return null;
+          }
+        assertTrue((access & Opcodes.ACC_PRIVATE) != 0);
+        assertTrue((access & Opcodes.ACC_STATIC) != 0);
+        assertTrue((access & Opcodes.ACC_SYNTHETIC) != 0);
+        return new MethodVisitor(Opcodes.ASM9)
+        {
+          @Override
+          public void visitLdcInsn(Object value)
+          {
+            if (value instanceof Type &&
+                className.equals(((Type) value).getInternalName()))
+              {
+                hasClassLiteral[0] = true;
+              }
+          }
 
-    assertFalse(
-                "Unexpected invocation was found: " + unexpected,
-                invocations.contains(unexpected));
+          @Override
+          public void visitMethodInsn(int opcode,
+                                      String owner,
+                                      String name,
+                                      String descriptor,
+                                      boolean isInterface)
+          {
+            if (opcode == Opcodes.INVOKESTATIC &&
+                ServiceLoaderWeaver.OSGI_SERVICE_LOADER.equals(owner) &&
+                "load".equals(name) &&
+                proxyDescriptor.equals(descriptor))
+              {
+                forwardsToProxy[0] = true;
+              }
+          }
+        };
+      }
+    }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+
+    assertTrue("Bridge did not load the woven class literal", hasClassLiteral[0]);
+    assertTrue("Bridge did not forward to the proxy ServiceLoader", forwardsToProxy[0]);
+  }
+
+  /**
+   * Verifies that an LDC constant contains a method handle with the expected
+   * target.
+   *
+   * @param bytes class-file bytes to inspect
+   * @param expectedTag expected ASM handle tag
+   * @param expectedOwner expected internal owner name
+   * @param expectedName expected method name
+   * @param expectedDescriptor expected method descriptor
+   */
+  private static void assertMethodHandleExists(byte[] bytes,
+                                               int expectedTag,
+                                               String expectedOwner,
+                                               String expectedName,
+                                               String expectedDescriptor)
+  {
+    final boolean[] found = { false };
+    new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9)
+    {
+      @Override
+      public MethodVisitor visitMethod(int access,
+                                       String name,
+                                       String descriptor,
+                                       String signature,
+                                       String[] exceptions)
+      {
+        return new MethodVisitor(Opcodes.ASM9)
+        {
+          @Override
+          public void visitLdcInsn(Object value)
+          {
+            if (value instanceof Handle)
+              {
+                Handle handle = (Handle) value;
+                found[0] |= handle.getTag() == expectedTag &&
+                            expectedOwner.equals(handle.getOwner()) &&
+                            expectedName.equals(handle.getName()) &&
+                            expectedDescriptor.equals(handle.getDesc());
+              }
+          }
+        };
+      }
+    }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+    assertTrue("Expected method handle was not found", found[0]);
+  }
+
+  /**
+   * Verifies that an {@code invokedynamic} bootstrap argument contains a method
+   * handle with the expected target.
+   *
+   * @param bytes class-file bytes to inspect
+   * @param expectedTag expected ASM handle tag
+   * @param expectedOwner expected internal owner name
+   * @param expectedName expected method name
+   * @param expectedDescriptor expected method descriptor
+   */
+  private static void assertInvokeDynamicMethodHandleExists(byte[] bytes,
+                                                            int expectedTag,
+                                                            String expectedOwner,
+                                                            String expectedName,
+                                                            String expectedDescriptor)
+  {
+    final boolean[] found = { false };
+    new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9)
+    {
+      @Override
+      public MethodVisitor visitMethod(int access,
+                                       String name,
+                                       String descriptor,
+                                       String signature,
+                                       String[] exceptions)
+      {
+        return new MethodVisitor(Opcodes.ASM9)
+        {
+          @Override
+          public void visitInvokeDynamicInsn(
+                                             String name,
+                                             String descriptor,
+                                             Handle bootstrapMethodHandle,
+                                             Object... bootstrapMethodArguments)
+          {
+            for (Object argument : bootstrapMethodArguments)
+              {
+                if (argument instanceof Handle)
+                  {
+                    Handle handle = (Handle) argument;
+                    found[0] |= handle.getTag() == expectedTag &&
+                                expectedOwner.equals(handle.getOwner()) &&
+                                expectedName.equals(handle.getName()) &&
+                                expectedDescriptor.equals(handle.getDesc());
+                  }
+              }
+          }
+        };
+      }
+    }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+    assertTrue("Expected invokedynamic method handle was not found", found[0]);
   }
 
   /**
@@ -895,34 +1475,32 @@ public class ServiceLoaderWeaverTest
       new ArrayList<Invocation>();
 
     new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9)
-                                  {
-                                    @Override
-                                    public MethodVisitor visitMethod(int access,
-                                                                     String name,
-                                                                     String descriptor,
-                                                                     String signature,
-                                                                     String[] exceptions)
-                                    {
-                                      return new MethodVisitor(Opcodes.ASM9)
-                                      {
-                                        @Override
-                                        public void visitMethodInsn(int opcode,
-                                                                    String owner,
-                                                                    String methodName,
-                                                                    String methodDescriptor,
-                                                                    boolean isInterface)
-                                        {
-                                          invocations.add(new Invocation(
-                                                                         opcode,
-                                                                         owner,
-                                                                         methodName,
-                                                                         methodDescriptor));
-                                        }
-                                      };
-                                    }
-                                  },
-                                  ClassReader.SKIP_DEBUG |
-                                     ClassReader.SKIP_FRAMES);
+    {
+      @Override
+      public MethodVisitor visitMethod(int access,
+                                       String name,
+                                       String descriptor,
+                                       String signature,
+                                       String[] exceptions)
+      {
+        return new MethodVisitor(Opcodes.ASM9)
+        {
+          @Override
+          public void visitMethodInsn(int opcode,
+                                      String owner,
+                                      String methodName,
+                                      String methodDescriptor,
+                                      boolean isInterface)
+          {
+            invocations.add(new Invocation(
+                                           opcode,
+                                           owner,
+                                           methodName,
+                                           methodDescriptor));
+          }
+        };
+      }
+    }, ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
 
     return invocations;
   }
@@ -952,96 +1530,104 @@ public class ServiceLoaderWeaverTest
       new ArrayList<String>();
 
     new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9)
-                                  {
-                                    @Override
-                                    public FieldVisitor visitField(int access,
-                                                                   String name,
-                                                                   String descriptor,
-                                                                   String signature,
-                                                                   Object value)
-                                    {
-                                      collectReference(references,
-                                                       "field " + name,
-                                                       descriptor);
+    {
+      @Override
+      public FieldVisitor visitField(int access,
+                                     String name,
+                                     String descriptor,
+                                     String signature,
+                                     Object value)
+      {
+        collectReference(references,
+                         "field " + name,
+                         descriptor);
 
-                                      collectReference(references,
-                                                       "field signature " + name,
-                                                       signature);
+        collectReference(references,
+                         "field signature " + name,
+                         signature);
 
-                                      return null;
-                                    }
+        return null;
+      }
 
-                                    @Override
-                                    public MethodVisitor visitMethod(int access,
-                                                                     String name,
-                                                                     String descriptor,
-                                                                     String signature,
-                                                                     String[] exceptions)
-                                    {
-                                      collectReference(references,
-                                                       "method " + name,
-                                                       descriptor);
+      @Override
+      public MethodVisitor visitMethod(int access,
+                                       String name,
+                                       String descriptor,
+                                       String signature,
+                                       String[] exceptions)
+      {
+        collectReference(references,
+                         "method " + name,
+                         descriptor);
 
-                                      collectReference(references,
-                                                       "method signature " +  name,
-                                                       signature);
+        collectReference(references,
+                         "method signature " + name,
+                         signature);
 
-                                      return new MethodVisitor(Opcodes.ASM9)
-                                      {
-                                        @Override
-                                        public void visitMethodInsn(int opcode,
-                                                                    String owner,
-                                                                    String methodName,
-                                                                    String methodDescriptor,
-                                                                    boolean isInterface)
-                                        {
-                                          if (ServiceLoaderWeaver.JAVA_SERVICE_LOADER.equals(owner))
-                                            {
-                                              references.add("invocation owner " +
-                                                             owner + "." +
-                                                             methodName +
-                                                             methodDescriptor);
-                                            }
+        return new MethodVisitor(Opcodes.ASM9)
+        {
+          @Override
+          public void visitMethodInsn(int opcode,
+                                      String owner,
+                                      String methodName,
+                                      String methodDescriptor,
+                                      boolean isInterface)
+          {
+            if (ServiceLoaderWeaver.JAVA_SERVICE_LOADER.equals(owner))
+              {
+                references.add("invocation owner " +
+                               owner + "." +
+                               methodName +
+                               methodDescriptor);
+              }
 
-                                          collectReference(references,
-                                                           "invocation descriptor " + methodName,
-                                                           methodDescriptor);
-                                        }
+            collectReference(references,
+                             "invocation descriptor " + methodName,
+                             methodDescriptor);
+          }
 
-                                        @Override
-                                        public void visitTypeInsn(int opcode,
-                                                                  String type)
-                                        {
-                                          if (ServiceLoaderWeaver.JAVA_SERVICE_LOADER.equals(type))
-                                            {
-                                              references.add("type instruction " +
-                                                             type);
-                                            }
-                                        }
+          @Override
+          public void visitTypeInsn(int opcode,
+                                    String type)
+          {
+            if (ServiceLoaderWeaver.JAVA_SERVICE_LOADER.equals(type))
+              {
+                references.add("type instruction " +
+                               type);
+              }
+          }
 
-                                        @Override
-                                        public void visitLdcInsn(Object value)
-                                        {
-                                          if (value instanceof Type)
-                                            {
-                                              Type type = (Type) value;
+          @Override
+          public void visitLdcInsn(Object value)
+          {
+            if (value instanceof Type)
+              {
+                Type type = (Type) value;
 
-                                              if (type.getSort() == Type.OBJECT &&
-                                                  ServiceLoaderWeaver.JAVA_SERVICE_LOADER.equals(type.getInternalName()))
-                                                {
-                                                  references.add("class literal " +  value);
-                                                }
-                                            }
-                                        }
-                                      };
-                                    }
-                                  },
-                                  0);
+                if (type.getSort() == Type.OBJECT &&
+                    ServiceLoaderWeaver.JAVA_SERVICE_LOADER
+                        .equals(type.getInternalName()))
+                  {
+                    references.add("class literal " + value);
+                  }
+              }
+          }
+        };
+      }
+    }, 0);
 
     assertTrue("Remaining java.util.ServiceLoader references: " + references,
                references.isEmpty());
   }
 
+  /**
+   * Records a bytecode location when its text contains the JDK ServiceLoader
+   * internal name.
+   *
+   * @param references mutable list of detected references
+   * @param location description of the bytecode location
+   * @param value descriptor or signature to inspect
+   */
   private static void collectReference(List<String> references,
                                        String location,
                                        String value)
@@ -1053,72 +1639,85 @@ public class ServiceLoaderWeaverTest
       }
   }
 
-  private static void assertFieldDescriptorExists(
-                                                  byte[] bytes,
+  /**
+   * Verifies that a generated class declares a field with the expected name and
+   * descriptor.
+   *
+   * @param bytes class-file bytes to inspect
+   * @param expectedName expected field name
+   * @param expectedDescriptor expected field descriptor
+   */
+  private static void assertFieldDescriptorExists(byte[] bytes,
                                                   String expectedName,
                                                   String expectedDescriptor)
   {
     List<FieldDescription> fields = readFields(bytes);
 
-    FieldDescription expected =
-      new FieldDescription(
-                           expectedName,
-                           expectedDescriptor);
+    FieldDescription expected = new FieldDescription(expectedName,
+                                                     expectedDescriptor);
 
     assertTrue("Expected field was not found. Existing fields: " + fields,
                fields.contains(expected));
   }
 
-  private static void assertNoFieldDescriptorExists(
-                                                    byte[] bytes,
+  /**
+   * Verifies that a generated class does not declare a field with the specified
+   * name and descriptor.
+   *
+   * @param bytes class-file bytes to inspect
+   * @param fieldName field name to exclude
+   * @param descriptor field descriptor to exclude
+   */
+  private static void assertNoFieldDescriptorExists(byte[] bytes,
                                                     String fieldName,
                                                     String descriptor)
   {
     List<FieldDescription> fields = readFields(bytes);
 
     FieldDescription unexpected =
-      new FieldDescription(
-                           fieldName,
-                           descriptor);
+      new FieldDescription(fieldName, descriptor);
 
     assertFalse("Unexpected field was found: " + unexpected,
                 fields.contains(unexpected));
   }
 
+  /**
+   * Reads the names and descriptors of all fields in a generated class.
+   *
+   * @param bytes class-file bytes to inspect
+   * @return field descriptions in class-file order
+   */
   private static List<FieldDescription> readFields(byte[] bytes)
   {
     final List<FieldDescription> fields =
       new ArrayList<FieldDescription>();
 
     new ClassReader(bytes).accept(new ClassVisitor(Opcodes.ASM9)
-                                  {
-                                    @Override
-                                    public FieldVisitor visitField(int access,
-                                                                   String name,
-                                                                   String descriptor,
-                                                                   String signature,
-                                                                   Object value)
-                                    {
-                                      fields.add(
-                                                 new FieldDescription(
-                                                                      name,
-                                                                      descriptor));
-
-                                      return null;
-                                    }
-                                  },
-                                  ClassReader.SKIP_CODE |
-                                     ClassReader.SKIP_DEBUG |
-                                     ClassReader.SKIP_FRAMES);
-
+    {
+      @Override
+      public FieldVisitor visitField(int access,
+                                     String name,
+                                     String descriptor,
+                                     String signature,
+                                     Object value)
+      {
+        fields.add(new FieldDescription(name, descriptor));
+        return null;
+      }
+    }, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
     return fields;
   }
 
+  /** Emits the body of a generated {@code consume()} method. */
   private interface MethodBody
   {
+    /**
+     * @param methodVisitor visitor for the generated method body
+     */
     void accept(MethodVisitor methodVisitor);
   }
 
+  /** Value object identifying one ordinary JVM method invocation. */
   private static final class Invocation
   {
     private final int opcode;
@@ -1126,6 +1725,12 @@ public class ServiceLoaderWeaverTest
     private final String name;
     private final String descriptor;
 
+    /**
+     * @param opcode invocation opcode
+     * @param owner internal owner name
+     * @param name method name
+     * @param descriptor method descriptor
+     */
     private Invocation(int opcode,
                        String owner,
                        String name,
@@ -1173,11 +1778,16 @@ public class ServiceLoaderWeaverTest
     }
   }
 
+  /** Value object identifying one field by name and JVM descriptor. */
   private static final class FieldDescription
   {
     private final String name;
     private final String descriptor;
 
+    /**
+     * @param name field name
+     * @param descriptor field descriptor
+     */
     private FieldDescription(String name,
                              String descriptor)
     {

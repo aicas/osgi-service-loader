@@ -1,63 +1,68 @@
 # OSGi Service Loader
 
-This project provides an OSGi service-loader mediator and the bytecode weaver
-used by it.
+`java.util.ServiceLoader` normally discovers providers through a class loader's
+`META-INF/services` resources. In OSGi, a consumer bundle cannot use that
+mechanism to discover provider implementations in other bundles. This project
+bridges that gap with an OSGi Service Loader mediator: a weaving hook redirects
+supported `ServiceLoader` calls to a proxy that discovers compatible providers
+through OSGi bundle wiring.
+
+The mediator supports the standard OSGi Service Loader Mediator metadata and
+also provides metadata-free discovery for existing bundles that use
+`META-INF/services` or `module-info.class` service declarations.
+
+## Repository layout
+
+| Path | Purpose |
+| --- | --- |
+| `serviceloader-weaver` | ASM-based bytecode transformer that transforms supported `java.util.ServiceLoader` calls to the `ServiceLoader` proxy. |
+| `serviceloader-mediator` | OSGi bundle containing the activator, metadata trackers, provider registry, weaving-hook registration, and proxy `ServiceLoader`. |
+| `serviceloader-itests` | Integration tests that start an embedded Felix framework. |
+| `serviceloader-realworld-itests` |Bnd/Felix compatibility tests for third-party APIs and providers, including JAXB, JSON, Mail, Validation, REST, Persistence, and WebSocket. |
+| `example` | Example SPI, consumer, provider, fragment, module-info and OSGi-service-registry bundles. |
+
 
 ## Requirements
 
-- Java 17 or newer
-- Maven 3.6.3 or newer
+- Java 17 or later
+- Maven 3.6.3 or later
+- An OSGi framework for runtime use
 
-## Build
+## Build and test
 
-Build the complete project, including the examples, with:
+Run these commands from this directory.
+
+Build the complete reactor, including examples:
 
 ```sh
 mvn clean package
 ```
 
-Build only the mediator and its required project modules with:
+Build the mediator and the project modules it requires:
 
 ```sh
 mvn -pl serviceloader-mediator -am package
 ```
 
-Run the tests with:
-
-```sh
-mvn test
-```
-
-Run the integration tests with:
+Run the integration suite:
 
 ```sh
 mvn -pl serviceloader-itests -am verify
 ```
 
-This builds and packages the required project modules first, then runs the
-integration tests from the standalone `serviceloader-itests` module. The tests
-start an embedded Felix framework automatically; no separate OSGi runtime is
-required.
-
-To run only the metadata-provider tests after the project modules have been
-built, use:
+Run the real-world compatibility suite:
 
 ```sh
-mvn -pl serviceloader-itests -am -Dit.test=MetadataProviderIntegrationTest verify
+mvn -pl serviceloader-realworld-itests -am verify
 ```
 
-The `-am` option also builds the example bundles required by the test.
+Both integration suites build their required modules and start Felix
+automatically; no separately installed OSGi runtime is needed for testing.
 
-The bundles are created in the corresponding `target` directories:
+## Install in an OSGi framework
 
-```text
-serviceloader-weaver/target/serviceloader-weaver-<version>.jar
-serviceloader-mediator/target/serviceloader-mediator-<version>.jar
-```
-
-## ASM dependencies
-
-The `serviceloader-weaver` bundle uses these ASM artifacts:
+Install matching versions of these ASM bundles before resolving the project
+bundles:
 
 - `org.ow2.asm:asm`
 - `org.ow2.asm:asm-util`
@@ -65,84 +70,141 @@ The `serviceloader-weaver` bundle uses these ASM artifacts:
 - `org.ow2.asm:asm-tree`
 - `org.ow2.asm:asm-analysis`
 
-These dependencies are required at runtime and must be installed as OSGi
-bundles in the framework. Use matching versions for all five bundles.
-
-## Running the mediator
-
-Run it by installing the following bundles into an OSGi framework:
-
-1. `serviceloader-weaver`.
-2. `serviceloader-mediator`.
-
-For example, in an OSGi console, install the two project bundles using their
-paths from the build output:
+Then install `serviceloader-weaver` and `serviceloader-mediator`, and start the
+mediator. For example, in an OSGi console:
 
 ```text
+install file:/path/to/asm-<version>.jar
+install file:/path/to/asm-util-<version>.jar
+install file:/path/to/asm-commons-<version>.jar
+install file:/path/to/asm-tree-<version>.jar
+install file:/path/to/asm-analysis-<version>.jar
 install file:/path/to/serviceloader-weaver/target/serviceloader-weaver-<version>.jar
 install file:/path/to/serviceloader-mediator/target/serviceloader-mediator-<version>.jar
 start <mediator-bundle-id>
 ```
 
-The mediator registers the `osgi.serviceloader.processor` and
+The mediator exposes the `osgi.serviceloader.processor` and
 `osgi.serviceloader.registrar` extender capabilities.
 
-## Consumer metadata
+## Provider and consumer modes
 
-The mediator analyzes a consumer host bundle and all of its attached fragments
-as one unit. It recognizes the host as a Service Loader consumer when this
-combined metadata declares an `osgi.extender` requirement for
-`osgi.serviceloader.processor`, then reads the associated
-`osgi.serviceloader` requirements to identify the requested service types.
+The mediator evaluates a host bundle and its attached fragments together.
 
-As an extension beyond the OSGi Service Loader Mediator specification, this
-mediator also recognizes a bundle whose `module-info.class` declares
-`uses <service-type>`. This fallback is used only when neither the host bundle
-nor an attached fragment declares the processor-extender requirement. Such a
-module-info consumer is registered for weaving even though it has no OSGi
-processor-extender requirement. This metadata is specific to this mediator and
-is not portable OSGi Service Loader Mediator metadata.
+| Mode | Provider declaration | Consumer behavior |
+| --- | --- | --- |
+| Standard OSGi Service Loader Mediator | Publish an `osgi.serviceloader` capability and use `META-INF/services` for provider classes. The optional `osgi.serviceloader.registrar` extender also registers providers in the OSGi service registry. | Require the `osgi.serviceloader.processor` extender. Optional `osgi.serviceloader` requirements restrict visibility to the selected provider wires. |
+| Metadata-free extension | Declare providers in `META-INF/services` and/or `module-info.class` `provides ... with ...` clauses. These entries are added to the mediator registry only; they are not registered as OSGi services. Providers that declare `osgi.serviceloader` metadata are included as well, so metadata-free consumers can discover them. | Bundles without an `osgi.serviceloader.processor` extender are woven automatically and discover compatible scanned providers only when both bundles are wired to the same service-type package. |
 
-## Provider metadata
+A standard metadata consumer does not discover metadata-free providers. A
+metadata-free consumer can discover both metadata-free and standard-metadata
+providers when the consumer and provider are wired to the same Service Type
+package.
 
-The mediator analyzes a provider host bundle and all of its attached fragments
-as one unit. It recognizes the host as a Service Loader provider when this
-combined metadata declares an `osgi.serviceloader` provide capability. It reads
-the capability's attributes to identify the provided service types and the
-provider classes listed in `META-INF/services/`. These providers are added to
-the mediator's provider registry. If the combined metadata also declares the
-`osgi.serviceloader.registrar` extender capability, the mediator registers OSGi
-services for the provided service types as well. OSGi provider metadata takes
-precedence over module metadata.
+## Weaver
 
-As another non-standard extension, if neither the provider host nor an attached
-fragment supplies usable `osgi.serviceloader` capability metadata, the mediator
-reads the host's `module-info.class` and processes `provides ... with ...`
-declarations instead. Module-info providers are added to the mediator's
-provider registry only; they are never registered as OSGi services. This
-fallback is specific to this mediator and is not portable OSGi Service Loader
-Mediator metadata.
+`ServiceLoaderWeaver` operates on one class file at a time. It validates all
+`java.util.ServiceLoader` invocations and relevant method handles before
+returning transformed bytes. If it finds an unsupported invocation or cannot
+transform the class, it leaves the entire class unchanged, preventing JDK and
+proxy ServiceLoader values from mixing in one class.
 
-To exercise the mediator, install and start example provider or consumer
-bundles after installing its SPI bundle and the required OSGi Service Loader
-extender support.
+For a successful class, the weaver remaps supported `java.util.ServiceLoader`
+calls to the proxy type. It supports:
 
+- `ServiceLoader.load(Class)`
+- `ServiceLoader.load(Class, ClassLoader)`
+- `iterator()`,
+- `reload()`,
+- `findFirst()`,
+- `toString()`.
 
-## ServiceLoader API support
+`load(ModuleLayer, Class)`, `loadInstalled(Class)`, and `stream()` are
+unsupported.
 
-The bytecode weaver currently supports `ServiceLoader.load`,
-`ServiceLoader.loadInstalled`, `iterator`, `reload`, `findFirst`, and
-`toString`. `ServiceLoader.stream()` is not yet supported.
+The static `load` overloads need the woven caller class, which
+the original bytecode does not provide. The weaver therefore generates at most
+two private static `serviceLoaderBridge$load` methods to preserve the
+original argument shapes:
 
-`ServiceLoader.loadInstalled` creates a fresh Java-only loader. Provider
-caches are scoped to an individual `ServiceLoader` instance, so this new loader
-has no cached OSGi provider instances and does not consult the mediator
-registry. It returns only providers declared in
-`META-INF/services/<service-type>` that are visible to the system class loader.
-To reuse cached OSGi providers, retain and reuse the same `ServiceLoader`
-instance.
+```text
+java.util.ServiceLoader.load(service)
+  -> Consumer.serviceLoaderBridge$load(service)
+  -> com.aicas.osgi.spi.proxy.ServiceLoader.load(service, Consumer.class)
 
-A class is woven only when every `ServiceLoader` invocation in that class is
-supported. If it contains an unsupported invocation, such as `stream()`, the
-weaver leaves the entire class unchanged. Keep unsupported calls in a separate
-class if the remaining calls should be mediated.
+java.util.ServiceLoader.load(service, loader)
+  -> Consumer.serviceLoaderBridge$load(service, loader)
+  -> com.aicas.osgi.spi.proxy.ServiceLoader.load(service, loader, Consumer.class)
+```
+
+`Consumer` is the woven application class that originally invoked
+`java.util.ServiceLoader`; `Consumer.class` lets the proxy `ServiceLoader`
+identify that class's OSGi bundle.
+
+## Proxy ServiceLoader
+
+`com.aicas.osgi.spi.proxy.ServiceLoader` replaces the JDK type inside a woven
+class. It combines visible mediator providers with a real
+`java.util.ServiceLoader` delegate.
+
+The mediator selects a provider only when the consumer and provider resolve the
+Service Type package to the same `osgi.wiring.package` capability. It loads the
+provider implementation through the provider bundle's class loader.
+
+When mediation is enabled, `iterator()` returns providers in this order:
+
+1. Visible mediator providers that already have cached instances.
+2. Remaining visible mediator providers.
+3. Providers from the Java ServiceLoader delegate.
+
+This combined iterator suppresses duplicate provider classes across the mediator
+and Java-delegate sequences, so each class is returned at most once per iterator.
+`findFirst()` uses the same order.
+
+If a mediator provider cannot start, load, or instantiate, the proxy logs a
+warning and skips it so iteration can continue with the next mediator provider.
+The failed entry is removed from the cache. Errors from the Java ServiceLoader
+delegate retain normal JDK behavior.
+
+Provider instances are cached per proxy loader. Before an iterator snapshot is
+built, cached definitions that are no longer visible in the mediator registry
+are removed.
+
+`reload()` clears both the mediator-provider cache and the Java delegate cache.
+As with `java.util.ServiceLoader`, obtain a new iterator after calling
+`reload()`.
+
+A later `iterator()` call reads a fresh mediator-registry snapshot and reflects
+tracked provider installations, updates, removals, and fragment attachments.
+An existing iterator retains its original snapshot.
+
+When the proxy loads a selected mediator provider, it starts its resolved but
+stopped host bundle on demand. After the last dependent consumer leaves, the
+mediator can stop an idle host after a grace period. Set the framework property
+`com.aicas.osgi.spi.provider.stop.delay.millis` to a positive delay in
+milliseconds; the default is 50 seconds.
+
+For `load(Class)`, mediation uses the woven caller's OSGi bundle when it has
+one. For `load(Class, ClassLoader)`, mediation applies only when the requested
+loader is that caller's bundle class loader; any other loader uses ordinary
+Java ServiceLoader discovery.
+
+When the mediator is unavailable or mediation is disabled for the loader, the
+proxy clears its mediator-provider cache and returns only Java-delegate
+providers.
+
+## Examples
+
+Install `serviceloader-spi` before running any of these scenarios:
+
+- **Metadata-free discovery:** Pair `serviceloader-consumer` with either
+  `serviceloader-provider-moduleinfo` or `serviceloader-provider`.
+- **Standard mediator metadata discovery:** Pair `serviceloader-consumer-metadata` with
+  `serviceloader-provider-metadata`. Add `serviceloader-osgi-client` to see
+  the registrar-created OSGi service.
+- **Fragment metadata:** Install `serviceloader-provider-fragment` and its
+  `serviceloader-provider` host, then run it with
+  `serviceloader-consumer-metadata`.
+- **Mixed discovery:** Pair `serviceloader-consumer` with
+  `serviceloader-provider-metadata` to show that a metadata-free consumer
+  discovers a provider that declares standard `osgi.serviceloader` metadata.

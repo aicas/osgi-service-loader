@@ -5,21 +5,10 @@
 
 package com.aicas.osgi.spi.proxy.internal;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Hashtable;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Set;
-import java.util.regex.Matcher;
+import java.util.*;
 import java.util.regex.Pattern;
 
 import org.osgi.framework.Bundle;
-import org.osgi.framework.FrameworkUtil;
-import org.osgi.framework.InvalidSyntaxException;
 import org.osgi.framework.namespace.HostNamespace;
 import org.osgi.resource.Namespace;
 import org.osgi.framework.wiring.BundleCapability;
@@ -28,297 +17,18 @@ import org.osgi.framework.wiring.BundleRevision;
 import org.osgi.framework.wiring.BundleWire;
 import org.osgi.framework.wiring.BundleWiring;
 
-import com.aicas.osgi.spi.proxy.internal.ServiceLoaderProviderTracker.ProviderCapability;
-import com.aicas.osgi.spi.proxy.internal.ServiceLoaderProviderTracker.RegisterMode;
-
 public class HeaderProcessor
 {
-  static final Map<String, Object> CONSUMER_EXTENDER_PROCESSOR =
-    createConsumerExtenderProcessorAttributes();
-
-  static final Map<String, Object> PROVIDER_EXTENDER_REGISTRAR =
-    createProviderExtenderRegistrarAttributes();
-
-  private static Map<String, Object> createConsumerExtenderProcessorAttributes()
+  /** The kind of Service Loader metadata declared by a bundle revision. */
+  enum MetadataKind
   {
-    Map<String, Object> attributes = new java.util.HashMap<>();
-    attributes.put(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE,
-                   MediatorConstants.PROCESSOR_EXTENDER_NAME);
-    attributes.put(MediatorConstants.VERSION_ATTRIBUTE,
-                   MediatorConstants.SPECIFICATION_VERSION);
-    return Collections.unmodifiableMap(attributes);
+    /** A declared {@code osgi.serviceloader} requirement. */
+    REQUIREMENT,
+
+    /** A declared {@code osgi.serviceloader} capability. */
+    CAPABILITY
   }
 
-  private static Map<String, Object> createProviderExtenderRegistrarAttributes()
-  {
-    Map<String, Object> attributes = new java.util.HashMap<>();
-    attributes.put(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE,
-                   MediatorConstants.REGISTRAR_EXTENDER_NAME);
-    attributes.put(MediatorConstants.VERSION_ATTRIBUTE,
-                   MediatorConstants.SPECIFICATION_VERSION);
-    return Collections.unmodifiableMap(attributes);
-  }
-
-  private static final Pattern SERVICE_NAME_PATTERN =
-      Pattern.compile("\\(" +
-          Pattern.quote(MediatorConstants.SERVICELOADER_CAPABILITY_NAMESPACE) +
-          "\\s*=\\s*" +
-          "([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)*)" +
-          "\\s*\\)");
-
-  private static final Pattern PROCESSOR_REQUIREMENT_PATTERN =
-      Pattern.compile("\\(" +
-          Pattern.quote(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE) +
-          "\\s*=\\s*" +
-          Pattern.quote(MediatorConstants.PROCESSOR_EXTENDER_NAME) +
-          "\\s*\\)");
-
-  /**
-   * The outcome of inspecting a Consumer's processor-extender requirement.
-   */
-  static final class ConsumerRequirementResult
-  {
-    private final boolean processorRequirementDeclared_;
-    private final boolean selectedByThisMediator_;
-    private final Set<String> serviceTypes_;
-
-    private ConsumerRequirementResult(boolean processorRequirementDeclared,
-                                      boolean selectedByThisMediator,
-                                      Set<String> serviceTypes)
-    {
-      processorRequirementDeclared_ = processorRequirementDeclared;
-      selectedByThisMediator_ = selectedByThisMediator;
-      serviceTypes_ = Set.copyOf(serviceTypes);
-    }
-
-    /** Returns whether a processor-extender requirement was declared. */
-    public boolean hasProcessorRequirement()
-    {
-      return processorRequirementDeclared_;
-    }
-
-    /** Returns whether the processor requirement selected this mediator. */
-    public boolean isSelectedByThisMediator()
-    {
-      return selectedByThisMediator_;
-    }
-
-    /**
-     * Returns the declared Service Types when this mediator was selected, or
-     * an empty set otherwise.
-     */
-    public Set<String> getServiceTypes()
-    {
-      return serviceTypes_;
-    }
-  }
-
-  /**
-   * Processes the ServiceLoader consumer requirements declared by the given
-   * bundle and its attached fragments for the specified mediator bundle.
-   *
-   * <p>The host bundle revision and all attached fragment revisions are treated
-   * as one consumer unit. If any of these revisions declares an
-   * {@code osgi.extender} requirement for
-   * {@code osgi.serviceloader.processor} and selects {@code mediatorBundle},
-   * this method collects the service-type names extracted from all
-   * {@code osgi.serviceloader} requirements declared by those revisions.</p>
-   *
-   * <p>This method does not inspect consumer class bytecode, determine whether
-   * a class invokes {@link java.util.ServiceLoader#load(Class)}, or resolve
-   * {@code osgi.serviceloader} requirements to concrete provider bundles. It
-   * does inspect resolved extender wires to determine whether
-   * {@code mediatorBundle} is the processor selected for the bundle.</p>
-   *
-   * @param bundle the host bundle whose consumer requirements should be inspected
-   * @param mediatorBundle the mediator bundle that must be selected by the
-   *        resolved processor extender wire
-   * @return a result that distinguishes a missing processor requirement from a
-   *         requirement selected by another mediator; service-type names are
-   *         included only when {@code mediatorBundle} is selected
-   */
-  static ConsumerRequirementResult processConsumerRequirements(Bundle bundle,
-                                                               Bundle mediatorBundle)
-  {
-    List<BundleRevision> revisions = getHostAndFragmentRevisions(bundle);
-    boolean processorRequirementDeclared = false;
-    for (BundleRevision revision : revisions)
-      {
-        List<BundleRequirement> requirements = revision.getDeclaredRequirements(
-            MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE);
-        for (BundleRequirement requirement : requirements)
-          {
-            String filter = requirement.getDirectives().get(
-                MediatorConstants.FILTER_DIRECTIVE);
-            if (filter != null && PROCESSOR_REQUIREMENT_PATTERN.matcher(filter).find())
-              {
-                processorRequirementDeclared = true;
-                break;
-              }
-          }
-        if (processorRequirementDeclared)
-          {
-            break;
-          }
-      }
-
-    if (!processorRequirementDeclared)
-      {
-        return new ConsumerRequirementResult(false,false, Set.of());
-      }
-
-    // The Service Loader Mediator specification requires a Consumer to select
-    // exactly one processor mediator. Reject a processor wire declared with
-    // cardinality:=multiple to avoid processing the same Consumer through
-    // multiple processor extenders.
-    if (!hasMediatorExtenderWire(revisions, CONSUMER_EXTENDER_PROCESSOR,
-                                 mediatorBundle, true))
-      {
-        return new ConsumerRequirementResult(true, false, Set.of());
-      }
-
-    MediatorActivator.printDebug("[CONSUMER_PROCESSOR]Found osgi.serviceloader consumer - " +
-                        bundle.getSymbolicName());
-    Set<String> requiredServiceNames = new LinkedHashSet<>();
-    for (BundleRevision revision : revisions)
-      {
-        List<BundleRequirement> requirements =
-            revision.getDeclaredRequirements(MediatorConstants.SERVICELOADER_CAPABILITY_NAMESPACE);
-        for (BundleRequirement req : requirements)
-          {
-            Set<String> serviceNames = extractServiceNames(req);
-            requiredServiceNames.addAll(serviceNames);
-            for (String serviceName : serviceNames)
-              {
-                MediatorActivator.printDebug(
-                    "[CONSUMER_PROCESSOR] Found required service type"
-                        + " - bundleID("
-                        + revision.getBundle().getBundleId()
-                        + ")"
-                        + " - serviceType("
-                        + serviceName
-                        + ")");
-              }
-          }
-      }
-    return new ConsumerRequirementResult(true, true, requiredServiceNames);
-  }
-  private static Set<String> extractServiceNames(BundleRequirement requirement)
-  {
-      String filterExpression =
-          requirement.getDirectives().get(MediatorConstants.FILTER_DIRECTIVE);
-
-      if (filterExpression == null || filterExpression.isBlank())
-        {
-          return Set.of();
-        }
-      // Validate the complete LDAP filter before extracting service-type
-      // clauses. A regex alone could accept a valid-looking fragment from an
-      // otherwise malformed filter.
-      try
-        {
-          FrameworkUtil.createFilter(filterExpression);
-        }
-      catch (InvalidSyntaxException e)
-        {
-          return Set.of();
-        }
-      Set<String> serviceNames = new LinkedHashSet<>();
-      Matcher matcher = SERVICE_NAME_PATTERN.matcher(filterExpression);
-      while (matcher.find())
-        {
-          serviceNames.add(matcher.group(1));
-        }
-      return serviceNames;
-  }
-
-  /**
-   * Reads Service Loader Provider metadata declared by the given bundle
-   * revisions.
-   *
-   * <p>The method collects the Service Types and service properties declared by
-   * {@code osgi.serviceloader} capabilities and extracts the {@code register}
-   * directive from each capability.</p>
-   *
-   * @param revisions the current host revision and its attached fragment
-   *                  revisions.
-   *
-   * @param providerCapabilities the list to which capability metadata is added.
-   * @return the declared Service Types, or {@code null} if none are declared.
-   */
-  static Set<String> readServiceLoaderProviderMetadata(List<BundleRevision> revisions,
-                                                       List<ProviderCapability> providerCapabilities)
-  {
-    Set<String> serviceTypes = new HashSet<String>();
-    for (BundleRevision revision : revisions)
-      {
-        List<BundleCapability> capabilities = revision.
-            getDeclaredCapabilities(MediatorConstants.SERVICELOADER_CAPABILITY_NAMESPACE);
-        for (BundleCapability cap : capabilities)
-          {
-            Object serviceTypeValue = cap.getAttributes().get(MediatorConstants.SERVICELOADER_CAPABILITY_NAMESPACE);
-
-            // the service type.
-            String serviceType = normalize((String)serviceTypeValue);
-            if (serviceType == null)
-              {
-                MediatorActivator.logger_.error("Invalid osgi.serviceloader capability " + cap);
-                continue;
-              }
-            serviceTypes.add(serviceType);
-            MediatorActivator.printDebug("[PROVIDER_PROCESSOR] Found service type: " + serviceType);
-
-            // parse attributes and register directive
-            Hashtable<String, Object> attributes = new Hashtable<String, Object>();
-            for (Entry<String, Object> entry : cap.getAttributes().entrySet())
-              {
-                String key = entry.getKey();
-                Object value = entry.getValue();
-                if (key.equals(MediatorConstants.SERVICELOADER_CAPABILITY_NAMESPACE) ||
-                    key.startsWith(".") ||
-                    value == null)
-                  {
-                    continue;
-                  }
-                attributes.put(entry.getKey(), entry.getValue());
-                MediatorActivator.printDebug("[PROVIDER_PROCESSOR] Provider Metadata " +
-                             entry.getKey() + ") - (" + entry.getValue() + ")");
-              }
-
-            String selectedProvider = null;
-            RegisterMode mode;
-            String register = cap.getDirectives().get(MediatorConstants.REGISTER_DIRECTIVE);
-            if (register == null)
-              {
-                mode = RegisterMode.ALL;
-              }
-            else
-              {
-                selectedProvider = normalize(register);
-
-                if (selectedProvider == null)
-                  {
-                    mode = RegisterMode.NONE;
-                  }
-                else
-                  {
-                    mode = RegisterMode.SINGLE;
-                  }
-              }
-            ProviderCapability pc = new ProviderCapability(serviceType,
-                                                            selectedProvider,
-                                                            mode,
-                                                            attributes);
-            providerCapabilities.add(pc);
-            MediatorActivator.printDebug("add providerCapabilities: " + pc);
-          }
-      }
-    if (serviceTypes.isEmpty())
-      {
-        return null;
-      }
-    return serviceTypes;
-  }
   /**
   * Removes leading and trailing whitespace from the specified string.
   *
@@ -343,6 +53,7 @@ public class HeaderProcessor
       }
     return str;
   }
+
   /**
    * Returns the current revision of the given bundle and the revisions of all
    * fragments currently attached to it.
@@ -382,12 +93,94 @@ public class HeaderProcessor
   }
 
   /**
+   * Returns whether a bundle or one of its attached fragments declares Service
+   * Loader metadata of the requested kind.
+   *
+   * <p>This method examines declarations only. It does not inspect resolved
+   * wires, so an optional or unresolved requirement is still reported.</p>
+   *
+   * @param bundle the host bundle to inspect.
+   * @param kind whether to inspect requirements or capabilities.
+   * @return {@code true} if the requested metadata is declared; {@code false}
+   *         otherwise.
+   */
+  static boolean hasServiceLoaderMetadata(Bundle bundle,
+                                          MetadataKind kind)
+  {
+    Objects.requireNonNull(kind, "kind");
+    for (BundleRevision revision : getHostAndFragmentRevisions(bundle))
+      {
+        if (kind == MetadataKind.REQUIREMENT)
+          {
+            if (!revision.getDeclaredRequirements(
+                MediatorConstants.SERVICELOADER_CAPABILITY_NAMESPACE).isEmpty())
+              {
+                return true;
+              }
+          }
+        else if (!revision.getDeclaredCapabilities(MediatorConstants.SERVICELOADER_CAPABILITY_NAMESPACE).
+                           isEmpty())
+          {
+            return true;
+          }
+      }
+    return false;
+  }
+
+  /**
+   * Returns whether a bundle or one of its attached fragments declares an
+   * {@code osgi.serviceloader.processor} extender requirement.
+   *
+   * <p>This method examines declarations only. It does not inspect resolved
+   * wires and therefore does not decide which mediator, if any, the Consumer
+   * selected.</p>
+   *
+   * @param bundle the host bundle to inspect.
+   * @return {@code true} if a processor extender requirement is declared;
+   *         {@code false} otherwise.
+   */
+  static boolean hasProcessorExtenderRequirement(Bundle bundle)
+  {
+    return hasExtenderRequirement(bundle,
+                                  MediatorConstants.PROCESSOR_EXTENDER_NAME);
+  }
+
+  /**
+   * Returns whether a bundle or one of its attached fragments declares an
+   * extender requirement for the supplied extender name.
+   */
+  private static boolean hasExtenderRequirement(Bundle bundle,
+                                                String extenderName)
+  {
+    Objects.requireNonNull(extenderName, "extenderName");
+    Pattern pattern = Pattern.compile("\\(" +
+        Pattern.quote(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE) +
+        "\\s*=\\s*" + Pattern.quote(extenderName) + "\\s*\\)");
+
+    for (BundleRevision revision : getHostAndFragmentRevisions(bundle))
+      {
+        for (BundleRequirement requirement :
+             revision.getDeclaredRequirements(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE))
+          {
+            String filter = requirement.getDirectives().
+                                        get(MediatorConstants.FILTER_DIRECTIVE);
+            if (filter != null &&
+                pattern.matcher(filter).find())
+              {
+                return true;
+              }
+          }
+      }
+    return false;
+  }
+
+  /**
    * Returns whether an extender requirement of one of the supplied revisions
    * is actually wired to the supplied mediator bundle.
    *
    * @param revisions the host and attached fragment revisions to inspect.
    *
-   * @param extenderAttributes the expected extender capability attributes.
+   * @param extenderName the expected {@code osgi.extender} capability value.
    * @param mediatorBundle the bundle that supplies this mediator's extender
    *        capability.
    * @param requireSingleCardinality whether a matching requirement declared
@@ -401,11 +194,11 @@ public class HeaderProcessor
    *
    */
   static boolean hasMediatorExtenderWire(List<BundleRevision> revisions,
-                                         Map<String, Object> extenderAttributes,
+                                         String extenderName,
                                          Bundle mediatorBundle,
                                          boolean requireSingleCardinality)
   {
-    if (mediatorBundle == null)
+    if (mediatorBundle == null || extenderName == null)
       {
         return false;
       }
@@ -416,7 +209,8 @@ public class HeaderProcessor
           {
             continue;
           }
-        for (BundleWire wire : wiring.getRequiredWires(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE))
+        for (BundleWire wire :
+             wiring.getRequiredWires(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE))
           {
             BundleRequirement requirement = wire.getRequirement();
             if (requireSingleCardinality &&
@@ -427,7 +221,7 @@ public class HeaderProcessor
               }
             BundleCapability capability = wire.getCapability();
             if (mediatorBundle.equals(wire.getProviderWiring().getBundle()) &&
-                hasExpectedAttributes(capability, extenderAttributes))
+                hasExtenderName(capability, extenderName))
               {
                 MediatorActivator.printDebug("[HEADER_PROCESSOR]Found mediator extender wire - " +
                                             revision.getBundle().getSymbolicName());
@@ -438,21 +232,11 @@ public class HeaderProcessor
     return false;
   }
 
-  private static boolean hasExpectedAttributes(BundleCapability capability,
-                                               Map<String, Object> expectedAttributes)
+  private static boolean hasExtenderName(BundleCapability capability,
+                                         String extenderName)
   {
-    if (capability == null)
-      {
-        return false;
-      }
-    Map<String, Object> actualAttributes = capability.getAttributes();
-    for (Entry<String, Object> expected : expectedAttributes.entrySet())
-      {
-        if (!expected.getValue().equals(actualAttributes.get(expected.getKey())))
-          {
-            return false;
-          }
-      }
-    return true;
+    return capability != null &&
+           extenderName.equals(capability.getAttributes().
+                               get(MediatorConstants.EXTENDER_CAPABILITY_NAMESPACE));
   }
 }
