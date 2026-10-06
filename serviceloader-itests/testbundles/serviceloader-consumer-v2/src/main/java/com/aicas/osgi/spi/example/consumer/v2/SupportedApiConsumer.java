@@ -34,11 +34,9 @@ public final class SupportedApiConsumer
    */
   public static void loadServiceWithGivenClassLoader(ClassLoader classLoader)
   {
-    ServiceLoader.load(SPIProvider.class, classLoader)
-        .findFirst()
-        .ifPresentOrElse(provider -> System.out.println(provider.getMessage()),
-                         () -> System.out.println(
-                             "[supportedApiConsumer] No provider found."));
+    ServiceLoader.load(SPIProvider.class, classLoader).findFirst().
+                  ifPresentOrElse(provider -> System.out.println(provider.getMessage()),
+                                  () -> System.out.println("[supportedApiConsumer] No provider found."));
   }
 
   /**
@@ -52,4 +50,26 @@ public final class SupportedApiConsumer
   {
     return ServiceLoader.load(SPIProvider.class, classLoader).toString();
   }
+
+  /**
+   * Verifies that reloading a mediated ServiceLoader replaces its cached
+   * provider instance.
+   *
+   * @return whether repeated lookup reuses an instance until reload, after
+   *         which lookup returns a new instance
+   */
+  public static boolean reloadReplacesCachedProvider()
+  {
+    ServiceLoader<SPIProvider> loader = ServiceLoader.load(SPIProvider.class);
+    SPIProvider first = loader.findFirst().orElseThrow();
+
+    if (first != loader.findFirst().orElseThrow())
+      {
+        return false;
+      }
+
+    loader.reload();
+    return first != loader.findFirst().orElseThrow();
+  }
+
 }

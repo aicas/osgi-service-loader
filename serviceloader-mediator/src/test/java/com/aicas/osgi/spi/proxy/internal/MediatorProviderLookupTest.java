@@ -30,7 +30,7 @@ public class MediatorProviderLookupTest
   @Test
   public void restrictedConsumerSeesOnlyItsWiredProvider()
   {
-    MediatorActivator mediator = new MediatorActivator();
+    MediatorActivator mediator = ActiveMediatorTestFixture.create().activator();
     BundleCapability servicePackage = packageCapability();
     Bundle consumer = bundleImportingPackage(servicePackage);
     Bundle allowedProvider = provider(1L);
@@ -53,7 +53,7 @@ public class MediatorProviderLookupTest
   @Test
   public void metadataFreeConsumerSeesEveryCompatibleProvider()
   {
-    MediatorActivator mediator = new MediatorActivator();
+    MediatorActivator mediator = ActiveMediatorTestFixture.create().activator();
     BundleCapability servicePackage = packageCapability();
     Bundle consumer = bundleImportingPackage(servicePackage);
     Bundle firstProvider = provider(1L);
@@ -74,7 +74,7 @@ public class MediatorProviderLookupTest
   @Test
   public void metadataFreeConsumerDoesNotDiscoverProviderWithoutPackageSource()
   {
-    MediatorActivator mediator = new MediatorActivator();
+    MediatorActivator mediator = ActiveMediatorTestFixture.create().activator();
     Bundle consumer = mock(Bundle.class);
     Bundle provider = provider(1L);
 
@@ -91,7 +91,7 @@ public class MediatorProviderLookupTest
   public void resolvedDynamicProviderCapabilityIsCached()
     throws Exception
   {
-    MediatorActivator mediator = new MediatorActivator();
+    MediatorActivator mediator = ActiveMediatorTestFixture.create().activator();
     BundleCapability servicePackage = packageCapability();
     Bundle consumer = bundleImportingPackage(servicePackage);
     Bundle provider = provider(1L);
@@ -136,7 +136,7 @@ public class MediatorProviderLookupTest
   public void javaPlatformServiceTypeDoesNotRequireAPackageWire()
     throws Exception
   {
-    MediatorActivator mediator = new MediatorActivator();
+    MediatorActivator mediator = ActiveMediatorTestFixture.create().activator();
     Bundle consumer = mock(Bundle.class);
     Bundle provider = provider(1L);
     String serviceType = java.util.function.Supplier.class.getName();

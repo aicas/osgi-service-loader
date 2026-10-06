@@ -151,8 +151,8 @@ public class PackageWiringUtilTest
   private static BundleCapability packageCapability()
   {
     BundleCapability capability = mock(BundleCapability.class);
-    when(capability.getAttributes())
-        .thenReturn(Map.of(BundleRevision.PACKAGE_NAMESPACE, PACKAGE_NAME));
+    when(capability.getAttributes()).
+         thenReturn(Map.of(BundleRevision.PACKAGE_NAMESPACE, PACKAGE_NAME));
     return capability;
   }
 }

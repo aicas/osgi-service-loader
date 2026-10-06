@@ -20,6 +20,7 @@ import java.util.*;
 
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleEvent;
+import org.osgi.framework.ServicePermission;
 import org.osgi.framework.wiring.BundleCapability;
 import org.osgi.framework.wiring.BundleRevision;
 import org.osgi.framework.wiring.BundleWiring;
@@ -93,10 +94,18 @@ BundleTrackerCustomizer<OsgiServiceEntry>
                         ServiceLoaderProviderTracker.getState(event.getType()));
       }
 
+    if (bundle == spiBundle_)
+      {
+        return null;
+      }
+    if (!MediatorSecurity.canReadMetadata(spiBundle_, bundle))
+      {
+        return null;
+      }
+
     BundleRevision bundleRevision = bundle.adapt(BundleRevision.class);
-    if (bundle.equals(spiBundle_) ||
-        ((bundleRevision != null) &&
-         ((bundleRevision.getTypes() & TYPE_FRAGMENT) == TYPE_FRAGMENT)))
+    if ((bundleRevision != null) &&
+        (bundleRevision.getTypes() & TYPE_FRAGMENT) == TYPE_FRAGMENT)
       {
         return null;
       }
@@ -276,7 +285,6 @@ BundleTrackerCustomizer<OsgiServiceEntry>
       }
     scanModuleInfo(bundle, impByType);
   }
-
 
   private List<ProviderCapability> createServiceLoaderCapabilities(Bundle bundle)
   {

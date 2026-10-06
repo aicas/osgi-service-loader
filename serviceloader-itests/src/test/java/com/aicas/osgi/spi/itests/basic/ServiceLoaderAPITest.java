@@ -7,6 +7,7 @@ package com.aicas.osgi.spi.itests.basic;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotSame;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.After;
 import org.junit.Before;
@@ -85,8 +86,7 @@ public class ServiceLoaderAPITest extends AbstractTest
   public void consumerV2DoesNotFindProviderWithContextClassLoader()
     throws Exception
   {
-    Class<?> supportedApiConsumer = consumer_.loadClass(
-                                                        SUPPORTED_API_CONSUMER);
+    Class<?> supportedApiConsumer = consumer_.loadClass(SUPPORTED_API_CONSUMER);
     ClassLoader contextClassLoader =
       Thread.currentThread().getContextClassLoader();
     assertNotSame("Context class loader must not be the consumer Bundle loader",
@@ -99,6 +99,22 @@ public class ServiceLoaderAPITest extends AbstractTest
 
     awaitOutputContainsAfter(outputOffset,
                              "[supportedApiConsumer] No provider found.");
+  }
+
+  /**
+   * Verifies that reloading a mediated ServiceLoader replaces its cached
+   * provider instance.
+   */
+  @Test
+  public void consumerV2ReloadReplacesCachedProvider()
+    throws Exception
+  {
+    Class<?> supportedApiConsumer = consumer_.loadClass(SUPPORTED_API_CONSUMER);
+
+    boolean replaced = (Boolean) supportedApiConsumer.getMethod("reloadReplacesCachedProvider").
+                                                      invoke(null);
+
+    assertTrue("Reload did not replace the cached provider", replaced);
   }
 
   /**

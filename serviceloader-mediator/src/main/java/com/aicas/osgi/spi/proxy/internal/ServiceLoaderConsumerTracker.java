@@ -44,11 +44,18 @@ BundleTrackerCustomizer<Bundle>
   public Bundle addingBundle(Bundle bundle, BundleEvent event)
   {
     if (event != null)
-    {
-      MediatorActivator.printDebug("[CONSUMER_TRACKER] addingBundle[" +
-                                   bundle.getBundleId() + "] " +
-                                   ServiceLoaderProviderTracker.getState(event.getType()));
-    }
+      {
+        MediatorActivator.printDebug("[CONSUMER_TRACKER] addingBundle[" +
+                                     bundle.getBundleId() + "] " +
+                                     ServiceLoaderProviderTracker.
+                                     getState(event.getType()));
+      }
+
+    Bundle mediatorBundle = activator_.getMediatorBundle();
+    if (!MediatorSecurity.canReadMetadata(mediatorBundle, bundle))
+      {
+        return null;
+      }
 
     BundleRevision revision = bundle.adapt(BundleRevision.class);
     if (revision != null &&

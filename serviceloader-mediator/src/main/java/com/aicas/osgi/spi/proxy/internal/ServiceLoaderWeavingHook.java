@@ -46,21 +46,10 @@ public class ServiceLoaderWeavingHook implements WeavingHook
   @Override
   public void weave(WovenClass wovenClass)
   {
-    Bundle consumerBundle = wovenClass.getBundleWiring().getBundle();
-
-    if (isInfrastructureBundle(consumerBundle))
+    if (!shouldWeave(wovenClass))
       {
         return;
       }
-
-    //  Don't process the class if it's bundle defines processor
-    //  extender but is not wired to this mediator.
-    if (HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) &&
-        !activator_.requiresProcessing(consumerBundle))
-      {
-        return;
-      }
-
     byte[] originalBytes = wovenClass.getBytes();
     ServiceLoaderWeaver.WeavingResult result =
         ServiceLoaderWeaver.weave(originalBytes);
@@ -86,6 +75,56 @@ public class ServiceLoaderWeavingHook implements WeavingHook
     wovenClass.setBytes(wovenBytes);
 
     printClassBytecode(wovenClass);
+  }
+
+  /**
+   * Determines whether the mediator should transform this class.
+   *
+   * <ul>
+   *   <li>Infrastructure bundles are excluded.</li>
+   *   <li>bundles whose metadata the mediator cannot read are excluded.</li>
+   *   <li>A bundle that selects another mediator is excluded.</li>
+   *   <li>A consumer selected by this mediator is always transformed.</li>
+   *   <li>A metadata-free consumer is transformed only when framework-level
+   *       ServiceLoader support is enabled.</li>
+   * </ul>
+   *
+   * @param wovenClass the class being considered by the weaving hook.
+   * @return {@code true} when the mediator should transform the class.
+   */
+  private boolean shouldWeave(WovenClass wovenClass)
+  {
+    Bundle consumerBundle = wovenClass.getBundleWiring().getBundle();
+
+    if (isInfrastructureBundle(consumerBundle))
+      {
+        return false;
+      }
+
+    if (!MediatorSecurity.canReadMetadata(activator_.getMediatorBundle(),
+                                          consumerBundle))
+      {
+        return false;
+      }
+
+    boolean isMetadataConsumer = activator_.isMetadataConsumer(consumerBundle);
+
+    //  Don't process the class if it's bundle defines processor
+    //  extender but is not wired to this mediator.
+    if (HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) &&
+        !isMetadataConsumer)
+      {
+        return false;
+      }
+
+    // if frameworkServiceLoader is disabled and the consumerBundle doesn't
+    // have processor extender.
+    if (!activator_.isFrameworkServiceLoaderEnabled() &&
+        !isMetadataConsumer)
+      {
+        return false;
+      }
+    return true;
   }
 
   /**

@@ -5,6 +5,7 @@
 
 package com.aicas.osgi.spi.proxy.internal;
 
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -22,8 +23,8 @@ import org.osgi.framework.BundleException;
 import org.osgi.service.log.Logger;
 
 /**
- * Tracks consumer dependencies of provider Bundles and stops an idle provider
- * after a configurable grace period.
+ * Tracks consumer dependencies of provider Bundles and, when enabled,  stops
+ * an idle provider after a configurable grace period.
  *
  * <p>A dependency begins when a provider has been prepared for a provider and
  * lasts until the consumer Bundle is removed. This deliberately tracks the
@@ -64,6 +65,8 @@ final class ProviderBundleLifecycleManager implements AutoCloseable
   private final ConcurrentMap<Bundle, PendingProviderStop>
     pendingProviderStops_ = new ConcurrentHashMap<>();
   private final long providerStopDelayMillis_;
+  private final boolean providerStopOnDemandEnabled_;
+  private final Bundle mediatorBundle_;
   private final Supplier<Logger> loggerSupplier_;
   private final Consumer<String> debugOutput_;
 
@@ -77,34 +80,23 @@ final class ProviderBundleLifecycleManager implements AutoCloseable
    * the framework properties.
    *
    * @param context the mediator Bundle context used to read the delay property.
+   * @param providerStopOnDemandEnabled whether idle providers may be stopped.
    * @param loggerSupplier supplies the current mediator logger for stop errors.
    * @param debugOutput receives optional lifecycle debug messages.
    */
   ProviderBundleLifecycleManager(BundleContext context,
+                                 boolean providerStopOnDemandEnabled,
                                  Supplier<Logger> loggerSupplier,
                                  Consumer<String> debugOutput)
   {
-    this(providerStopDelayMillis(context), loggerSupplier, debugOutput);
-  }
-
-  /**
-   * Creates a lifecycle manager with an explicit idle-provider delay.
-   *
-   * <p>This constructor supports deterministic lifecycle tests without an
-   * OSGi framework property lookup.</p>
-   *
-   * @param providerStopDelayMillis delay between a provider becoming idle and
-   *        its stop attempt.
-   * @param loggerSupplier supplies the current mediator logger for stop errors.
-   * @param debugOutput receives optional lifecycle debug messages.
-   */
-  ProviderBundleLifecycleManager(long providerStopDelayMillis,
-                                 Supplier<Logger> loggerSupplier,
-                                 Consumer<String> debugOutput)
-  {
-    this.providerStopDelayMillis_ = providerStopDelayMillis;
-    this.loggerSupplier_ = loggerSupplier;
-    this.debugOutput_ = debugOutput;
+    BundleContext mediatorContext = Objects.requireNonNull(context,
+                                                            "context");
+    mediatorBundle_ = Objects.requireNonNull(mediatorContext.getBundle(),
+                                              "context bundle");
+    providerStopDelayMillis_ = providerStopDelayMillis(mediatorContext);
+    providerStopOnDemandEnabled_ = providerStopOnDemandEnabled;
+    loggerSupplier_ = loggerSupplier;
+    debugOutput_ = debugOutput;
   }
 
   /*---------------------------- methods ------------------------------*/
@@ -120,6 +112,10 @@ final class ProviderBundleLifecycleManager implements AutoCloseable
    */
   void addDependency(Bundle provider, Bundle consumer)
   {
+    if (!providerStopOnDemandEnabled_)
+      {
+        return;
+      }
     synchronized (providerStopLock_)
       {
         cancelPendingProviderStop(provider);
@@ -147,6 +143,10 @@ final class ProviderBundleLifecycleManager implements AutoCloseable
    */
   void removeConsumer(Bundle consumer)
   {
+    if (!providerStopOnDemandEnabled_)
+      {
+        return;
+      }
     synchronized (providerStopLock_)
       {
         activeDependencies_.forEach((provider, consumers) ->
@@ -261,6 +261,11 @@ final class ProviderBundleLifecycleManager implements AutoCloseable
           {
             return;
           }
+      }
+
+    if (!MediatorSecurity.canExecute(mediatorBundle_, provider))
+      {
+        return;
       }
 
     try

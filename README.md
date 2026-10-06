@@ -87,6 +87,24 @@ start <mediator-bundle-id>
 The mediator exposes the `osgi.serviceloader.processor` and
 `osgi.serviceloader.registrar` extender capabilities.
 
+## Security
+
+When a `SecurityManager` is present, the mediator checks permissions before
+performing cross-bundle operations. A denied permission prevents that operation
+and the associated provider is not exposed through mediation.
+
+The mediator needs `AdminPermission` for the bundles it processes:
+
+```text
+AdminPermission[<consumer and provider bundles>,METADATA]
+AdminPermission[<provider bundles>,CLASS|CONTEXT]
+AdminPermission[<provider bundles>,EXECUTE]  # when on-demand start/stop is used
+```
+
+Consumers need `ServicePermission[<service type>,GET]`. Providers need
+`ServicePermission[<service type>,REGISTER]` when the mediator delivers a
+provider or registers it as an OSGi service.
+
 ## Provider and consumer modes
 
 The mediator evaluates a host bundle and its attached fragments together.
@@ -177,13 +195,6 @@ a new snapshot are removed.
 As with `java.util.ServiceLoader`, obtain a new iterator after calling
 `reload()`.
 
-
-When the proxy loads a selected mediator provider, it starts the provider’s host
-bundle on demand if it is not already active or starting. After the last dependent
-consumer leaves, the mediator can stop an idle host after a grace period. Set the
-framework property `com.aicas.osgi.spi.provider.stop.delay.millis` to a positive
-delay in milliseconds; the default is 50 seconds.
-
 For `load(Class)`, mediation uses the woven caller's OSGi bundle when it has
 one. For `load(Class, ClassLoader)`, mediation applies only when the requested
 loader is that caller's bundle class loader; any other loader uses ordinary
@@ -192,6 +203,20 @@ Java ServiceLoader discovery.
 When the mediator is unavailable or mediation is disabled for the loader, the
 proxy clears its mediator-provider cache and returns only Java-delegate
 providers.
+
+## Framework properties
+
+The mediator reads these properties when it starts.
+
+| Property | Default | Behavior |
+| --- | --- | --- |
+| `org.osgi.framework.serviceloader` | `enabled` | Enables framework-level ServiceLoader mediation for metadata-free consumers. When `disabled`, those consumers use ordinary Java ServiceLoader discovery; consumers using the `osgi.serviceloader.processor` extender continue to use standard OSGi Service Loader Mediator processing. |
+| `com.aicas.osgi.spi.provider.start.on.demand` | `enabled` | Starts a selected provider bundle when it is not already active or starting. When `disabled`, inactive provider bundles are not started automatically. |
+| `com.aicas.osgi.spi.provider.stop.on.demand` | `enabled` | Stops an idle provider after all its consumer leave. When `disabled`, the mediator does not stop idle provider bundles automatically. |
+| `com.aicas.osgi.spi.provider.stop.delay.millis` | `50000` | Sets the positive grace period, in milliseconds, before an idle provider host is stopped. Invalid or non-positive values use the default. This applies only when on-demand stopping is enabled. |
+
+The boolean properties accept case-insensitive `enabled` and `disabled` values.
+Missing or invalid values use their `enabled` default.
 
 ## Examples
 

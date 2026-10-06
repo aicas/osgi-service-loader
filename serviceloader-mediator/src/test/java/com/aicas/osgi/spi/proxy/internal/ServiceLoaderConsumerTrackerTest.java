@@ -6,9 +6,10 @@
 package com.aicas.osgi.spi.proxy.internal;
 
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 
 import java.util.Collections;
 import java.util.Map;
@@ -59,8 +60,7 @@ public class ServiceLoaderConsumerTrackerTest
 
     new ServiceLoaderConsumerTracker(activator).addingBundle(bundle, null);
 
-    verify(activator).getMediatorBundle();
-    verifyNoMoreInteractions(activator);
+    verify(activator, never()).registerConsumerBundle(any(), any());
   }
 
   @Test
@@ -81,12 +81,11 @@ public class ServiceLoaderConsumerTrackerTest
     new ServiceLoaderConsumerTracker(activator).
           addingBundle(bundleWithRevision(revision), null);
 
-    verify(activator).getMediatorBundle();
-    verifyNoMoreInteractions(activator);
+    verify(activator, never()).registerConsumerBundle(any(), any());
   }
 
   @Test
-  public void ignoresInvalidConsumerRequirementFilter()
+  public void doesNotProcessConsumerWhenMediatorBundleIsUnavailable()
   {
     BundleRevision revision = mock(BundleRevision.class);
     BundleRequirement extenderRequirement = mock(BundleRequirement.class);
@@ -101,8 +100,7 @@ public class ServiceLoaderConsumerTrackerTest
 
     new ServiceLoaderConsumerTracker(activator).addingBundle(bundle, null);
 
-    verify(activator).getMediatorBundle();
-    verifyNoMoreInteractions(activator);
+    verify(activator, never()).registerConsumerBundle(any(), any());
   }
 
   @Test

@@ -107,6 +107,18 @@ public class MediatorActivator implements BundleActivator
 
   private ProviderBundleLifecycleManager providerBundleLifecycleManager_;
 
+  /**
+   * Framework-level ServiceLoader support setting, fixed when the mediator
+   * starts. Chapter 133 mediation is independent of this setting.
+   */
+  private boolean frameworkServiceLoaderEnabled_;
+
+  /** Whether inactive providers may be started while preparing a provider. */
+  private boolean providerStartOnDemandEnabled_;
+
+  /** Whether an idle provider may be stopped after its grace period. */
+  private boolean providerStopOnDemandEnabled_;
+
   /*---------------------------- methods ------------------------------*/
   /**
    * <p>This method initializes the activator with the given bundle context and
@@ -126,10 +138,6 @@ public class MediatorActivator implements BundleActivator
   public synchronized void start(BundleContext context) throws Exception
   {
     bundleContext_ = context;
-    providerBundleLifecycleManager_ =
-        new ProviderBundleLifecycleManager(context,
-                                           () -> logger_,
-                                           MediatorActivator::printDebug);
     activator_ = this;
     loggerFactoryTracker_ = new ServiceTracker<>(context, LoggerFactory.class,
         new ServiceTrackerCustomizer<LoggerFactory, LoggerFactory>()
@@ -168,6 +176,27 @@ public class MediatorActivator implements BundleActivator
           }
         });
     loggerFactoryTracker_.open();
+
+    frameworkServiceLoaderEnabled_ =
+        booleanProperty(context,
+                        MediatorConstants.FRAMEWORK_SERVICELOADER_PROPERTY,
+                        true);
+
+    providerStartOnDemandEnabled_ =
+        booleanProperty(context,
+                        MediatorConstants.PROVIDER_START_ON_DEMAND_PROPERTY,
+                        true);
+
+    providerStopOnDemandEnabled_ =
+        booleanProperty(context,
+                        MediatorConstants.PROVIDER_STOP_ON_DEMAND_PROPERTY,
+                        true);
+
+    providerBundleLifecycleManager_ =
+        new ProviderBundleLifecycleManager(context,
+                                           providerStopOnDemandEnabled_,
+                                           () -> logger_,
+                                           MediatorActivator::printDebug);
 
     WeavingHook wh = new ServiceLoaderWeavingHook(this);
     weavingHookService_ = context.registerService(WeavingHook.class.getName(),
@@ -247,6 +276,49 @@ public class MediatorActivator implements BundleActivator
       }
   }
 
+  /**
+   * Returns whether framework-level ServiceLoader support is enabled.
+   */
+  public boolean isFrameworkServiceLoaderEnabled()
+  {
+    return frameworkServiceLoaderEnabled_;
+  }
+
+  /**
+   * Returns whether an inactive provider may be started on demand.
+   */
+  public boolean isProviderStartOnDemandEnabled()
+  {
+    return providerStartOnDemandEnabled_;
+  }
+
+  /**
+   * Reads an enabled-or-disabled mediator property. Missing and invalid values
+   * use the supplied default.
+   */
+  private static boolean booleanProperty(BundleContext context,
+                                         String property,
+                                         boolean defaultValue)
+  {
+    String value = context.getProperty(property);
+    if (value == null)
+      {
+        return defaultValue;
+      }
+    if ("enabled".equalsIgnoreCase(value))
+      {
+        return true;
+      }
+    if ("disabled".equalsIgnoreCase(value))
+      {
+        return false;
+      }
+    logger_.warn("Invalid value '" + value + "' for " + property
+                 + "; using the default value '"
+                 + (defaultValue ? "enabled" : "disabled") + "'.");
+    return defaultValue;
+  }
+
   public void unregisterConsumerBundle(Bundle bundle)
   {
     consumerRequirements_.remove(bundle);
@@ -272,7 +344,7 @@ public class MediatorActivator implements BundleActivator
   /**
    * Returns {@code true} if this bundle require ServiceLoader processing.
    */
-  public boolean requiresProcessing(Bundle bundle)
+  public boolean isMetadataConsumer(Bundle bundle)
   {
     return consumerRequirements_.containsKey(bundle);
   }
@@ -526,6 +598,12 @@ public class MediatorActivator implements BundleActivator
       {
         return capability;
       }
+
+    if (!MediatorSecurity.canLoadClasses(getMediatorBundle(),
+                                         entry.providerBundle()))
+      {
+        return null;
+      }
     // Load the Service Type class to trigger a dynamic import, if necessary.
     try
       {
@@ -576,9 +654,9 @@ public class MediatorActivator implements BundleActivator
     return bundleContext_.getBundle(bundleId);
   }
 
-  Bundle getMediatorBundle()
+  public Bundle getMediatorBundle()
   {
-    return bundleContext_ == null ? null : bundleContext_.getBundle();
+    return bundleContext_.getBundle();
   }
 
   // for internal debug.
