@@ -8,32 +8,37 @@ package com.aicas.osgi.spi.proxy.internal;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.util.Textifier;
 import org.objectweb.asm.util.TraceClassVisitor;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingException;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
+import org.osgi.framework.wiring.BundleWiring;
 
 import com.aicas.osgi.spi.weaver.ServiceLoaderWeaver;
+import com.aicas.osgi.spi.weaver.StaticWeavingStatus;
+import com.aicas.osgi.spi.weaver.WeaverConstants;
 
 public class ServiceLoaderWeavingHook implements WeavingHook
 {
   private final MediatorActivator activator_;
   private final Bundle weaverBundle_;
+
+  /**
+   * Concurrent cache of wirings found to carry a valid static processing status.
+   * Replacement wirings are checked independently, and unmarked wirings are
+   * not cached. Entries are held by strong references for this hook's lifetime.
+   */
+  private final Set<BundleWiring> staticallyProcessedWirings_ =
+      ConcurrentHashMap.newKeySet();
   private static final String MEDIATOR_PACKAGE =
       com.aicas.osgi.spi.proxy.ServiceLoader.class.getPackage().getName();
-
-  private static final List<String>
-  INFRASTRUCTURE_BUNDLE_PREFIXES = List.of("org.objectweb.asm",
-                                           "biz.aQute.tester",
-                                           "junit-platform-",
-                                           "junit-jupiter-",
-                                           "org.opentest4j",
-                                           "assertj-core",
-                                           "net.bytebuddy");
 
   ServiceLoaderWeavingHook(MediatorActivator act)
   {
@@ -81,6 +86,8 @@ public class ServiceLoaderWeavingHook implements WeavingHook
    * Determines whether the mediator should transform this class.
    *
    * <ul>
+   *   <li>Statically processed wirings are excluded, with positive header
+   *       checks cached for subsequent classes using the same wiring.</li>
    *   <li>Infrastructure bundles are excluded.</li>
    *   <li>bundles whose metadata the mediator cannot read are excluded.</li>
    *   <li>A bundle that selects another mediator is excluded.</li>
@@ -94,9 +101,23 @@ public class ServiceLoaderWeavingHook implements WeavingHook
    */
   private boolean shouldWeave(WovenClass wovenClass)
   {
-    Bundle consumerBundle = wovenClass.getBundleWiring().getBundle();
+    BundleWiring wiring = wovenClass.getBundleWiring();
+    Bundle consumerBundle = wiring.getBundle();
 
-    if (isInfrastructureBundle(consumerBundle))
+    if (consumerBundle == null ||
+        consumerBundle.getBundleId() == 0 ||
+        consumerBundle.equals(activator_.getMediatorBundle()) ||
+        consumerBundle.equals(weaverBundle_))
+      {
+        return false;
+      }
+
+    if (WeaverConstants.isInfrastructureBundle(consumerBundle.getSymbolicName()))
+      {
+        return false;
+      }
+
+    if (isStaticallyProcessed(wiring, consumerBundle))
       {
         return false;
       }
@@ -128,26 +149,41 @@ public class ServiceLoaderWeavingHook implements WeavingHook
   }
 
   /**
-   * Returns whether this is a framework bundle which must not be transformed.
+   * Checks the static processing header, caching only positive results by wiring.
    *
-   * <p>The hook must not weave its own mediator bundle: doing so requires
-   * loading mediator classes while their definitions are being transformed.
-   * The weaver and system bundles are similarly framework infrastructure,
-   * rather than Service Loader consumers.</p>
+   * <p>Only exact statuses accepted by {@link StaticWeavingStatus} count as
+   * processed. Invalid values fail class loading and are not cached. Concurrent
+   * cache misses may read headers and add the same wiring more than once;
+   * the concurrent set deduplicates entries. Cache hits skip header reads.</p>
+   *
+   * @param wiring wiring used to load the class.
+   * @param bundle bundle whose headers are checked on a cache miss.
+   * @return {@code true} if the wiring is cached or its status is valid;
+   *         {@code false} if the header is absent.
+   * @throws WeavingException if the header is present with an invalid value.
    */
-  private boolean isInfrastructureBundle(Bundle bundle)
+  private boolean isStaticallyProcessed(BundleWiring wiring, Bundle bundle)
   {
-    if (bundle == null ||
-        bundle.getBundleId() == 0 ||
-        bundle.equals(activator_.getMediatorBundle()) ||
-        bundle.equals(weaverBundle_))
+    if (staticallyProcessedWirings_.contains(wiring))
       {
         return true;
       }
-
-    String symbolicName = bundle.getSymbolicName();
-    return symbolicName != null &&
-           INFRASTRUCTURE_BUNDLE_PREFIXES.stream().anyMatch(symbolicName::startsWith);
+    String value = bundle.getHeaders().get(WeaverConstants.STATIC_WEAVING_HEADER);
+    if (value == null)
+      {
+        return false;
+      }
+    if (!StaticWeavingStatus.isValid(value))
+      {
+        throw new WeavingException("Invalid " +
+                                   WeaverConstants.STATIC_WEAVING_HEADER +
+                                   " value '" + value + "' in bundle " +
+                                   bundle.getSymbolicName() +
+                                   " [" + bundle.getBundleId() +
+                                   "].");
+      }
+    staticallyProcessedWirings_.add(wiring);
+    return true;
   }
 
   /**

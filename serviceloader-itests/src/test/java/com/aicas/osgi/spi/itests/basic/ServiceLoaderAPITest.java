@@ -19,11 +19,6 @@ import com.aicas.osgi.spi.itests.support.AbstractTest;
 /** Verifies JDK ServiceLoader stream and explicit-class-loader API paths. */
 public class ServiceLoaderAPITest extends AbstractTest
 {
-  private static final String SUPPORTED_API_CONSUMER =
-    "com.aicas.osgi.spi.example.consumer.v2.SupportedApiConsumer";
-  private static final String STREAM_CONSUMER =
-    "com.aicas.osgi.spi.example.consumer.v2.StreamConsumer";
-
   private Bundle provider_;
   private Bundle consumer_;
 

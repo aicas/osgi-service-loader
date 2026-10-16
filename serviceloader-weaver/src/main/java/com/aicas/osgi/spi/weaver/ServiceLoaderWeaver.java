@@ -750,6 +750,7 @@ public final class ServiceLoaderWeaver
 
     private final Status status;
     private final byte[] bytes;
+    private Exception exception = null;
 
     private WeavingResult(Status status,
                           byte[] bytes)
@@ -779,8 +780,10 @@ public final class ServiceLoaderWeaver
     private static WeavingResult transformationError(byte[] originalBytes,
                                                      RuntimeException exception)
     {
-      return new WeavingResult(Status.TRANSFORMATION_ERROR,
-                               originalBytes);
+      WeavingResult result = new WeavingResult(Status.TRANSFORMATION_ERROR,
+                                               originalBytes);
+      result.exception = exception;
+      return result;
     }
 
     /**
@@ -791,6 +794,11 @@ public final class ServiceLoaderWeaver
     public Status getStatus()
     {
       return status;
+    }
+
+    public Exception getException()
+    {
+      return exception;
     }
 
     /**

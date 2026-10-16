@@ -159,6 +159,52 @@ java.util.ServiceLoader.load(service, loader)
 `java.util.ServiceLoader`; `Consumer.class` lets the proxy `ServiceLoader`
 identify that class's OSGi bundle.
 
+## Static weaving
+
+Packaging `serviceloader-weaver` also creates an executable
+`serviceloader-weaver-<version>-jar-with-dependencies.jar`. Use it to weave a
+OSGi bundle before installation:
+
+```text
+java -jar serviceloader-weaver-<version>-jar-with-dependencies.jar input.jar [output-directory]
+```
+
+The weaver does not verify JAR signatures, including those in embedded JARs.
+Weaving may invalidate existing signatures retained in the generated JAR.
+Remove any existing signature metadata and sign the generated JAR before
+installation.
+
+The first argument is the input JAR. The optional second argument is an
+existing output directory, specified as an absolute path or a path relative
+to the current directory. If omitted, the output is written to the current
+directory.
+
+The output filename replaces the input filename's extension with
+`-spi-consumer.jar`: for example, `bundle.jar` becomes
+`bundle-spi-consumer.jar`. An existing target file or symbolic link is warned
+about and deleted.
+
+Successful processing produces an output JAR with one of these manifest headers:
+
+- `Aicas-OSGi-Spi-Weaver: woven` when at least one class was woven.
+  An import for `com.aicas.osgi.spi.proxy` is added if absent.
+- `Aicas-OSGi-Spi-Weaver: scanned` when scanning completes without
+  transforming any class. Class and resource contents remain unchanged.
+
+Both values cause the runtime weaving hook to skip the bundle. Values must
+match exactly: uppercase forms, empty values, and surrounding whitespace are
+invalid. A missing header allows normal processing. An invalid value causes
+the offline tool to report an exception; the runtime hook throws a
+`WeavingException`, failing the current class load without disabling the hook.
+
+If an exception occurs while reading, scanning, or transforming classes, processing stops
+immediately, no new output JAR is published, and the exception is reported.
+
+All class entries in the outer archive are scanned. Embedded JARs are scanned
+only when named by `Bundle-ClassPath`; deeper embedded JARs are not processed
+recursively. Input JARs already carrying a valid `Aicas-OSGi-Spi-Weaver`
+status are skipped without producing output.
+
 ## Proxy ServiceLoader
 
 `com.aicas.osgi.spi.proxy.ServiceLoader` replaces the JDK type inside a woven
