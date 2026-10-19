@@ -13,7 +13,6 @@ import org.junit.Test;
 
 import com.aicas.osgi.spi.proxy.internal.MediatorActivator;
 
-import static com.aicas.osgi.spi.proxy.ServiceLoaderTestSupport.*;
 import static org.junit.Assert.*;
 
 /**
@@ -34,6 +33,26 @@ import static org.junit.Assert.*;
  */
 public class JavaDelegateServiceLoaderTest
 {
+  /** Service type used to exercise Java ServiceLoader discovery. */
+  public interface TestService
+  {
+    String value();
+  }
+
+  /** Provider declared in the test class loader's service registration resource. */
+  public static final class JavaProvider implements TestService
+  {
+    public JavaProvider()
+    {
+    }
+
+    @Override
+    public String value()
+    {
+      return "JavaProvider";
+    }
+  }
+
   @Test
   public void loadUsesTheJavaDelegateWhenMediatorIsUnavailable()
   {

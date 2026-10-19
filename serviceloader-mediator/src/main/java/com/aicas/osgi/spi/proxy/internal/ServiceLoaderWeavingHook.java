@@ -8,8 +8,8 @@ package com.aicas.osgi.spi.proxy.internal;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.util.Textifier;
@@ -27,18 +27,23 @@ import com.aicas.osgi.spi.weaver.WeaverConstants;
 
 public class ServiceLoaderWeavingHook implements WeavingHook
 {
+  /** Fixed metadata classification for a bundle wiring. */
+  private enum WiringAnalysis
+  {
+    SKIP,
+    PROCESSOR_REQUIRED,
+    METADATA_FREE
+  }
+
   private final MediatorActivator activator_;
   private final Bundle weaverBundle_;
 
   /**
-   * Concurrent cache of wirings found to carry a valid static processing status.
-   * Replacement wirings are checked independently, and unmarked wirings are
-   * not cached. Entries are held by strong references for this hook's lifetime.
+   * Fixed wiring analyses, held by strong references for this hook's lifetime.
+   * Consumer registration and metadata permissions are checked on each load.
    */
-  private final Set<BundleWiring> staticallyProcessedWirings_ =
-      ConcurrentHashMap.newKeySet();
-  private static final String MEDIATOR_PACKAGE =
-      com.aicas.osgi.spi.proxy.ServiceLoader.class.getPackage().getName();
+  private final ConcurrentMap<BundleWiring, WiringAnalysis> wiringAnalyses_ =
+      new ConcurrentHashMap<>();
 
   ServiceLoaderWeavingHook(MediatorActivator act)
   {
@@ -46,6 +51,8 @@ public class ServiceLoaderWeavingHook implements WeavingHook
     // Resolve this before registering the hook. Resolving the weaver bundle
     // from weave() can otherwise trigger a class-loading cycle.
     weaverBundle_ = FrameworkUtil.getBundle(ServiceLoaderWeaver.class);
+    // Loading the analysis enum from weave() would also re-enter this hook.
+    WiringAnalysis.values();
   }
 
   @Override
@@ -72,9 +79,9 @@ public class ServiceLoaderWeavingHook implements WeavingHook
     // Add the package visibility before publishing the transformed bytes.
     List<String> dynamicImports = wovenClass.getDynamicImports();
 
-    if (!dynamicImports.contains(MEDIATOR_PACKAGE))
+    if (!dynamicImports.contains(WeaverConstants.PROXY_PACKAGE))
       {
-        dynamicImports.add(MEDIATOR_PACKAGE);
+        dynamicImports.add(WeaverConstants.PROXY_PACKAGE);
       }
 
     wovenClass.setBytes(wovenBytes);
@@ -83,91 +90,83 @@ public class ServiceLoaderWeavingHook implements WeavingHook
   }
 
   /**
-   * Determines whether the mediator should transform this class.
+   * Determines whether the mediator should attempt to weave this class.
    *
    * <ul>
-   *   <li>Statically processed wirings are excluded, with positive header
-   *       checks cached for subsequent classes using the same wiring.</li>
+   *   <li>Statically processed wirings are excluded.</li>
    *   <li>Infrastructure bundles are excluded.</li>
-   *   <li>bundles whose metadata the mediator cannot read are excluded.</li>
+   *   <li>Bundles whose metadata the mediator cannot currently read are excluded.</li>
    *   <li>A bundle that selects another mediator is excluded.</li>
-   *   <li>A consumer selected by this mediator is always transformed.</li>
-   *   <li>A metadata-free consumer is transformed only when framework-level
+   *   <li>An otherwise eligible consumer selected by this mediator is processed.</li>
+   *   <li>A metadata-free consumer is processed only when framework-level
    *       ServiceLoader support is enabled.</li>
    * </ul>
    *
+   * <p>Caches whether the bundle should always be skipped and whether it
+   * declares a processor requirement. These properties remain fixed for
+   * the same wiring.</p>
+   *
+   * <p>Does not cache metadata permissions or consumer registration status,
+   * because they can change without a new wiring. Invalid static processing
+   * headers throw an exception and are not cached.</p>
+   *
    * @param wovenClass the class being considered by the weaving hook.
-   * @return {@code true} when the mediator should transform the class.
+   * @return {@code true} when the mediator should attempt to weave the class.
+   * @throws WeavingException if analysis encounters an invalid static processing
+   *         header value.
    */
   private boolean shouldWeave(WovenClass wovenClass)
   {
     BundleWiring wiring = wovenClass.getBundleWiring();
     Bundle consumerBundle = wiring.getBundle();
-
-    if (consumerBundle == null ||
-        consumerBundle.getBundleId() == 0 ||
-        consumerBundle.equals(activator_.getMediatorBundle()) ||
-        consumerBundle.equals(weaverBundle_))
+    WiringAnalysis analysis = wiringAnalyses_.get(wiring);
+    if (analysis == null &&
+        (consumerBundle == null ||
+         consumerBundle.getBundleId() == 0 ||
+         consumerBundle.equals(activator_.getMediatorBundle()) ||
+         consumerBundle.equals(weaverBundle_) ||
+         WeaverConstants.isInfrastructureBundle(consumerBundle.getSymbolicName())))
+      {
+        wiringAnalyses_.put(wiring, WiringAnalysis.SKIP);
+        return false;
+      }
+    if (analysis == WiringAnalysis.SKIP ||
+        !MediatorSecurity.canReadMetadata(activator_.getMediatorBundle(),
+                                         consumerBundle))
       {
         return false;
       }
-
-    if (WeaverConstants.isInfrastructureBundle(consumerBundle.getSymbolicName()))
+    if (analysis == null)
+      {
+        if (isStaticallyProcessed(consumerBundle))
+          {
+            analysis = WiringAnalysis.SKIP;
+          }
+        else
+          {
+            analysis = HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) ?
+                       WiringAnalysis.PROCESSOR_REQUIRED : WiringAnalysis.METADATA_FREE;
+          }
+        wiringAnalyses_.put(wiring, analysis);
+      }
+    if (analysis == WiringAnalysis.SKIP)
       {
         return false;
       }
-
-    if (isStaticallyProcessed(wiring, consumerBundle))
-      {
-        return false;
-      }
-
-    if (!MediatorSecurity.canReadMetadata(activator_.getMediatorBundle(),
-                                          consumerBundle))
-      {
-        return false;
-      }
-
-    boolean isMetadataConsumer = activator_.isMetadataConsumer(consumerBundle);
-
-    //  Don't process the class if it's bundle defines processor
-    //  extender but is not wired to this mediator.
-    if (HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) &&
-        !isMetadataConsumer)
-      {
-        return false;
-      }
-
-    // if frameworkServiceLoader is disabled and the consumerBundle doesn't
-    // have processor extender.
-    if (!activator_.isFrameworkServiceLoaderEnabled() &&
-        !isMetadataConsumer)
-      {
-        return false;
-      }
-    return true;
+    return activator_.isMetadataConsumer(consumerBundle) ||
+           (analysis == WiringAnalysis.METADATA_FREE &&
+            activator_.isFrameworkServiceLoaderEnabled());
   }
 
   /**
-   * Checks the static processing header, caching only positive results by wiring.
+   * Checks the bundle's static processing header.
    *
-   * <p>Only exact statuses accepted by {@link StaticWeavingStatus} count as
-   * processed. Invalid values fail class loading and are not cached. Concurrent
-   * cache misses may read headers and add the same wiring more than once;
-   * the concurrent set deduplicates entries. Cache hits skip header reads.</p>
-   *
-   * @param wiring wiring used to load the class.
-   * @param bundle bundle whose headers are checked on a cache miss.
-   * @return {@code true} if the wiring is cached or its status is valid;
-   *         {@code false} if the header is absent.
+   * @param bundle bundle whose headers are checked.
+   * @return {@code true} if the status is valid; {@code false} if absent.
    * @throws WeavingException if the header is present with an invalid value.
    */
-  private boolean isStaticallyProcessed(BundleWiring wiring, Bundle bundle)
+  private boolean isStaticallyProcessed(Bundle bundle)
   {
-    if (staticallyProcessedWirings_.contains(wiring))
-      {
-        return true;
-      }
     String value = bundle.getHeaders().get(WeaverConstants.STATIC_WEAVING_HEADER);
     if (value == null)
       {
@@ -182,7 +181,6 @@ public class ServiceLoaderWeavingHook implements WeavingHook
                                    " [" + bundle.getBundleId() +
                                    "].");
       }
-    staticallyProcessedWirings_.add(wiring);
     return true;
   }
 
