@@ -55,6 +55,8 @@ public abstract class AbstractTest
       "Hi, I was declared by the updated module-info.java revision.";
   protected static final String V2_PROVIDER_MESSAGE =
       "Hello, I was provided by SPI 2.0.";
+  protected static final String DYNAMIC_IMPORT_PROVIDER_V2_MESSAGE =
+      "Hello, I was provided by SPI 2.0 through DynamicImport-Package.";
 
   protected static final String BUNDLE_WEAVER = "serviceloader-weaver";
   protected static final String BUNDLE_MEDIATOR = "serviceloader-mediator";
@@ -63,6 +65,10 @@ public abstract class AbstractTest
   protected static final String BUNDLE_CONSUMER = "serviceloader-consumer";
   protected static final String BUNDLE_CONSUMER_V2 =
       "serviceloader-consumer-v2";
+  protected static final String BUNDLE_DYNAMIC_IMPORT_CONSUMER_V2 =
+      "serviceloader-dynamic-import-consumer-v2";
+  protected static final String BUNDLE_DYNAMIC_IMPORT_PROVIDER_V2 =
+      "serviceloader-dynamic-import-provider-v2";
   protected static final String BUNDLE_CONSUMER_METADATA =
       "serviceloader-consumer-metadata";
   protected static final String BUNDLE_CONSUMER_UPDATE =
@@ -89,6 +95,10 @@ public abstract class AbstractTest
       "serviceloader-two-service-provider-fragment";
   protected static final String BUNDLE_TWO_SERVICE_PROVIDER_HOST =
       "serviceloader-two-service-provider-host";
+  protected static final String SUPPORTED_API_CONSUMER =
+      "com.aicas.osgi.spi.example.consumer.v2.SupportedApiConsumer";
+  protected static final String STREAM_CONSUMER =
+      "com.aicas.osgi.spi.example.consumer.v2.StreamConsumer";
 
   private Framework framework_;
   private BundleContext context_;
@@ -130,9 +140,11 @@ public abstract class AbstractTest
     installTestBundle(BUNDLE_SPI_V2).start();
   }
 
+  /** Cleans framework storage and restores output even when framework shutdown fails. */
   @After
   public void stopFramework() throws Exception
   {
+    Throwable failure = null;
     try
       {
         if (framework_ != null)
@@ -140,17 +152,43 @@ public abstract class AbstractTest
             framework_.stop();
             framework_.waitForStop(5000);
           }
-        if (storage_ != null)
-          {
-            deleteTree(storage_);
-          }
+      }
+    catch (Exception | Error stopFailure)
+      {
+        failure = stopFailure;
       }
     finally
       {
+        try
+          {
+            if (storage_ != null)
+              {
+                deleteTree(storage_);
+              }
+          }
+        catch (Exception | Error cleanupFailure)
+          {
+            if (failure != null)
+              {
+                failure.addSuppressed(cleanupFailure);
+              }
+            else
+              {
+                failure = cleanupFailure;
+              }
+          }
         if (originalOut_ != null)
           {
             System.setOut(originalOut_);
           }
+      }
+    if (failure instanceof Exception)
+      {
+        throw (Exception) failure;
+      }
+    if (failure instanceof Error)
+      {
+        throw (Error) failure;
       }
   }
 
@@ -430,14 +468,14 @@ public abstract class AbstractTest
     return count;
   }
 
-  private Bundle install(String bundleArtifact, Path source) throws Exception
+  protected Bundle install(String bundleArtifact, Path source) throws Exception
   {
     Path bundle = Files.createTempFile(storage_, bundleArtifact + "-", ".jar");
     Files.copy(source, bundle, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
     return context_.installBundle(bundle.toUri().toString());
   }
 
-  private static Path findBundleJar(Path project, String artifact)
+  protected static Path findBundleJar(Path project, String artifact)
       throws IOException
   {
     Path target = project.resolve("target");

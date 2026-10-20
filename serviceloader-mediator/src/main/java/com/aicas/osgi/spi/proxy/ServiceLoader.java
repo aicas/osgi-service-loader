@@ -33,10 +33,12 @@ import java.util.concurrent.CompletionException;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleException;
 import org.osgi.framework.BundleReference;
+import org.osgi.framework.ServicePermission;
 import org.osgi.framework.wiring.BundleRevision;
 import org.osgi.framework.wiring.BundleWiring;
 
 import com.aicas.osgi.spi.proxy.internal.MediatorActivator;
+import com.aicas.osgi.spi.proxy.internal.MediatorSecurity;
 
 /**
  * Loads implementations of a service type through both the OSGi Service
@@ -134,76 +136,167 @@ public class ServiceLoader<S> implements Iterable<S>
    * The Provider class is loaded when {@link #type()} is first called and
    * instantiated when {@link #get()} is called.
    */
-  private final class ProviderImpl<S> implements Provider<S>
+  private final class ProviderImpl implements Provider<S>
   {
     private final ProviderDefinition definition;
     private Class<? extends S> providerClass;
+    private final MediatorActivator mediator;
 
-    ProviderImpl(ProviderDefinition definition)
+    ProviderImpl(ProviderDefinition definition, MediatorActivator mediator,
+                 Class<? extends S> providerClass)
     {
       this.definition = definition;
+      this.mediator = mediator;
+      this.providerClass = providerClass;
     }
 
     @SuppressWarnings({ "unchecked" })
     @Override
     public Class<? extends S> type()
     {
-      if (providerClass == null)
-        {
-          providerClass = (Class<? extends S>) loadProviderClass(definition);
-        }
       return providerClass;
     }
 
     @Override
     public S get()
     {
-      Class<? extends S> providerType = type();
-      try
-        { // TODO: add acc check here
-          Constructor<? extends S> constructor =
-            providerType.getConstructor();
+      Class<? extends S> providerType =
+          (Class<? extends S>) loadProviderClass(definition);
+      if (providerType != null)
+        {
+          try
+          {
+            Constructor<? extends S> constructor =
+              providerType.getConstructor();
 
-          if (!Modifier.isPublic(constructor.getModifiers()))
-            {
-              throw fail("Provider " + providerType.getName() +
-                         " does not have a public no-argument constructor");
-            }
+            if (!Modifier.isPublic(constructor.getModifiers()))
+              {
+                throw fail("Provider " + providerType.getName() +
+                           " does not have a public no-argument constructor");
+              }
 
-          return constructor.newInstance();
-        }
-      catch (NoSuchMethodException e)
-        {
-          throw fail("Provider " + providerType.getName() +
-                     " does not have a public no-argument constructor",
-                     e);
-        }
-      catch (InstantiationException e)
-        {
-          throw fail("Provider " + providerType.getName() +
-                     " could not be instantiated",
-                     e);
-        }
-      catch (IllegalAccessException e)
-        {
-          throw fail("Provider constructor is not accessible: " +
-                     providerType.getName(),
-                     e);
-        }
-      catch (InvocationTargetException e)
-        {
-          Throwable cause =  e.getCause() == null ? e : e.getCause();
+            return constructor.newInstance();
+          }
+        catch (NoSuchMethodException e)
+          {
+            throw fail("Provider " + providerType.getName() +
+                       " does not have a public no-argument constructor",
+                       e);
+          }
+        catch (InstantiationException e)
+          {
+            throw fail("Provider " + providerType.getName() +
+                       " could not be instantiated",
+                       e);
+          }
+        catch (IllegalAccessException e)
+          {
+            throw fail("Provider constructor is not accessible: " +
+                       providerType.getName(),
+                       e);
+          }
+        catch (InvocationTargetException e)
+          {
+            Throwable cause =  e.getCause() == null ? e : e.getCause();
 
-          throw fail("Provider constructor failed: " + providerType.getName(),
-                     cause);
+            throw fail("Provider constructor failed: " + providerType.getName(),
+                       cause);
+          }
+        catch (ExceptionInInitializerError e)
+          {
+            throw fail("Provider initialization failed: " +
+                       providerType.getName(),
+                       e);
+          }
         }
-      catch (ExceptionInInitializerError e)
-        {
-          throw fail("Provider initialization failed: " +
-                     providerType.getName(),
-                     e);
-        }
+      return null;
     }
+
+    /**
+     * Starts a stopped provider Bundle when necessary, then loads and validates
+     * its implementation class through the Bundle's current wiring.
+     *
+     * @param definition the provider definition.
+     *
+     * @return the provider implementation class as a subclass of the requested
+     *         service type.
+     *
+     * @throws ServiceConfigurationError if the provider Bundle cannot be
+     *         started, has no current class loader, the class cannot be loaded,
+     *         or the class is not assignable to the requested service type
+     */
+    private Class<? extends S> loadProviderClass(ProviderDefinition definition)
+    {
+      Bundle providerBundle = definition.bundleRev.getBundle();
+
+      // register permission from provider
+      if (!MediatorSecurity.hasServicePermission(definition.bundleRev.getBundle(),
+                                                 service.getName(),
+                                                 ServicePermission.REGISTER))
+        {
+          throw fail("Provider bundle " + definition.bundleRev.getSymbolicName() +
+                     " does not have permission to register service type " +
+                     serviceName);
+        }
+      Bundle mediatorBundle = mediator.getMediatorBundle();
+      if (!MediatorSecurity.canLoadClasses(mediatorBundle, providerBundle))
+        {
+          return null;
+        }
+
+      if (!isProviderBundleAvailable(providerBundle))
+        {
+          if (!mediator.isProviderStartOnDemandEnabled())
+            {
+              throw fail("The provider bundle is not active.");
+            }
+          if (MediatorSecurity.canExecute(mediatorBundle, providerBundle))
+            {
+              try
+              {
+                providerBundle.start();
+              }
+            catch (BundleException | SecurityException | IllegalStateException e)
+              {
+                throw fail("Provider bundle could not be started", e);
+              }
+            }
+        }
+
+      ClassLoader providerLoader = getBundleClassLoader(providerBundle);
+      if (providerLoader == null)
+        {
+          throw fail("Provider bundle " + definition.bundleRev +
+                     " has no current bundle class loader");
+        }
+
+      final Class<?> providerClass;
+      try
+        {
+          providerClass = Class.forName(definition.serviceImplemenation,
+                                        false,
+                                        providerLoader);
+          MediatorActivator.printDebug("[SERVICE_ITERATOR] got provider " + providerClass.getName());
+        }
+      catch (ClassNotFoundException e)
+        {
+          throw fail(definition.serviceImplemenation + " was not found", e);
+        }
+      catch (LinkageError e)
+        {
+          throw fail(definition.serviceImplemenation + " from bundle " +
+                     definition.bundleRev + " could not be loaded",
+                     e);
+        }
+
+      if (!service.isAssignableFrom(providerClass))
+        {
+          throw fail("Provider " + definition.serviceImplemenation + " from bundle " +
+                     definition.bundleRev + " is not a subtype of " + serviceName);
+        }
+      return providerClass.asSubclass(service);
+    }
+
   }
 
   private final class CombinedIterator implements Iterator<S>
@@ -300,14 +393,18 @@ public class ServiceLoader<S> implements Iterable<S>
      */
     private S nextProvider;
 
+    private MediatorActivator mediator;
+
     /**
      * Creates an iterator over a provider-definition and provider-cache
      * snapshot.
      *
      * @param providers the provider-definition snapshot.
      */
-    MediatorServiceIterator(ProviderDefinition[] providers)
+    MediatorServiceIterator(MediatorActivator mediator,
+                            ProviderDefinition[] providers)
     {
+      this.mediator = mediator;
       this.definitionSnapshot = providers;
     }
 
@@ -361,7 +458,7 @@ public class ServiceLoader<S> implements Iterable<S>
               if (provider != null)
                 {
                   nextProvider = provider;
-                  MediatorActivator.activator_.addDependency(definition.bundleRev.getBundle(),
+                  mediator.addDependency(definition.bundleRev.getBundle(),
                                                              consumerBundle);
                   return true;
                 }
@@ -441,7 +538,7 @@ public class ServiceLoader<S> implements Iterable<S>
 
       try
         {
-          Provider<S> provider = new ProviderImpl<>(definition);
+          Provider<S> provider = new ProviderImpl(definition, mediator, service);
           providerFuture.complete(provider.get());
         }
       catch (Throwable e)
@@ -649,17 +746,27 @@ public class ServiceLoader<S> implements Iterable<S>
         return javaFallBackServiceLoader(service);
       }
 
+    MediatorActivator mediator = MediatorActivator.activator_;
     Bundle consumerBundle = consumerBundleOf(callerClass);
-    if(consumerBundle == null)
+    if (!mediator.isFrameworkServiceLoaderEnabled() &&
+        (consumerBundle == null ||
+         !mediator.isMetadataConsumer(consumerBundle)))
+      {
+        return javaFallBackServiceLoader(service);
+      }
+
+    if(consumerBundle == null ||
+       !MediatorSecurity.hasServicePermission(consumerBundle,
+                                              service.getName(),
+                                              ServicePermission.GET))
     {
       return javaFallBackServiceLoader(service);
     }
-    else
-      {
-        MediatorActivator.printDebug("Consumer bundle is " + consumerBundle.getSymbolicName());
-      }
-    return new ServiceLoader<>(service, java.util.ServiceLoader.load(service),
-            consumerBundle, true);
+
+    return new ServiceLoader<>(service,
+                               java.util.ServiceLoader.load(service),
+                               consumerBundle,
+                               true);
   }
 
 
@@ -696,35 +803,59 @@ public class ServiceLoader<S> implements Iterable<S>
     Objects.requireNonNull(service, "service");
     Objects.requireNonNull(callerClass, "callerClass");
 
-    java.util.ServiceLoader<S> javaDelegate =
-            java.util.ServiceLoader.load(service, requestedLoader);
-
     if (MediatorActivator.activator_ == null)
       {
         System.err.println("Service Loader Mediator is unavailable; " +
                            "using the Java ServiceLoader delegate.");
-        return new ServiceLoader<S>(service, javaDelegate,
-                                    null, false);
+        return javaFallBackServiceLoader(service, requestedLoader);
+      }
+
+    MediatorActivator mediator = MediatorActivator.activator_;
+    Bundle consumerBundle = consumerBundleOf(callerClass);
+    if (!mediator.isFrameworkServiceLoaderEnabled() &&
+        (consumerBundle == null ||
+         !mediator.isMetadataConsumer(consumerBundle)))
+      {
+        return javaFallBackServiceLoader(service, requestedLoader);
       }
     /*
      * R11: only mediate when the caller explicitly uses its own bundle class
      * loader. Any other loader must retain ordinary Java ServiceLoader behavior.
      */
-    Bundle consumerBundle = consumerBundleOf(callerClass);
-    if(consumerBundle == null ||
-            (callerClass.getClassLoader() != requestedLoader))
+    if (consumerBundle == null ||
+        (callerClass.getClassLoader() != requestedLoader))
       {
-        return new ServiceLoader<S>(service, javaDelegate,
-                                    null, false);
+        return javaFallBackServiceLoader(service, requestedLoader);
       }
 
-    return new ServiceLoader<>(service, javaDelegate, consumerBundle,true);
+    if (!MediatorSecurity.hasServicePermission(consumerBundle,
+                                               service.getName(),
+                                               ServicePermission.GET))
+      {
+        return javaFallBackServiceLoader(service, requestedLoader);
+      }
+
+    return new ServiceLoader<>(service,
+                               java.util.ServiceLoader.load(service,
+                                                            requestedLoader),
+                               consumerBundle,
+                               true);
   }
 
   static <S> ServiceLoader<S>  javaFallBackServiceLoader(Class<S> service)
   {
     return new ServiceLoader<>(service, java.util.ServiceLoader.load(service),
-                               null, false);
+                               null,
+                               false);
+  }
+
+  static <S> ServiceLoader<S>  javaFallBackServiceLoader(Class<S> service,
+                                                         ClassLoader loader)
+  {
+    return new ServiceLoader<>(service,
+                               java.util.ServiceLoader.load(service, loader),
+                               null,
+                               false);
   }
 
   /**
@@ -879,68 +1010,6 @@ public class ServiceLoader<S> implements Iterable<S>
     return result;
   }
 
-  /**
-   * Starts a stopped provider Bundle when necessary, then loads and validates
-   * its implementation class through the Bundle's current wiring.
-   *
-   * @param definition the provider definition.
-   *
-   * @return the provider implementation class as a subclass of the requested
-   *         service type.
-   *
-   * @throws ServiceConfigurationError if the provider Bundle cannot be
-   *         started, has no current class loader, the class cannot be loaded,
-   *         or the class is not assignable to the requested service type
-   */
-  private Class<? extends S> loadProviderClass(ProviderDefinition definition)
-  {
-    Bundle providerBundle = definition.bundleRev.getBundle();
-
-    if (!isProviderBundleAvailable(providerBundle))
-      {
-        try
-          {
-            providerBundle.start();
-          }
-        catch (BundleException | SecurityException | IllegalStateException e)
-          {
-            throw fail("Provider bundle could not be started", e);
-          }
-      }
-
-    ClassLoader providerLoader = getBundleClassLoader(providerBundle);
-    if (providerLoader == null)
-      {
-        throw fail("Provider bundle " + definition.bundleRev +
-                   " has no current bundle class loader");
-      }
-
-    final Class<?> providerClass;
-    try
-      {
-        providerClass = Class.forName(definition.serviceImplemenation,
-                                      false,
-                                      providerLoader);
-        MediatorActivator.printDebug("[SERVICE_ITERATOR] got provider " + providerClass.getName());
-      }
-    catch (ClassNotFoundException e)
-      {
-        throw fail(definition.serviceImplemenation + " was not found", e);
-      }
-    catch (LinkageError e)
-      {
-        throw fail(definition.serviceImplemenation + " from bundle " +
-                   definition.bundleRev + " could not be loaded",
-                   e);
-      }
-
-    if (!service.isAssignableFrom(providerClass))
-      {
-        throw fail("Provider " + definition.serviceImplemenation + " from bundle " +
-                   definition.bundleRev + " is not a subtype of " + serviceName);
-      }
-    return providerClass.asSubclass(service);
-  }
 
   /**
    * Returns an iterator over providers visible through the Java delegate and
@@ -976,7 +1045,9 @@ public class ServiceLoader<S> implements Iterable<S>
         buildProviderDefinitionSnapshot(activator, definitions);
         ProviderDefinition[] definitionArray =
             definitions.toArray(ProviderDefinition[]::new);
-        MediatorServiceIterator osgiIterator = new MediatorServiceIterator(definitionArray);
+        MediatorServiceIterator osgiIterator =
+            new MediatorServiceIterator(activator,
+                                        definitionArray);
         iteratorArray = new Iterator[]{ osgiIterator, javaIterator};
       }
     return new CombinedIterator(iteratorArray);

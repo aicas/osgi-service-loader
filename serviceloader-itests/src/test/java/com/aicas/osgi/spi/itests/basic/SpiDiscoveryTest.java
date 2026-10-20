@@ -6,12 +6,18 @@
 package com.aicas.osgi.spi.itests.basic;
 
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertNotNull;
 
+import java.util.Map;
+
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.osgi.framework.Bundle;
 
 import com.aicas.osgi.spi.example.spi.SPIProvider;
 import com.aicas.osgi.spi.itests.support.AbstractTest;
+import com.aicas.osgi.spi.proxy.internal.MediatorConstants;
 
 /**
  * Verifies ServiceLoader provider discovery without OSGi ServiceLoader
@@ -20,6 +26,25 @@ import com.aicas.osgi.spi.itests.support.AbstractTest;
  */
 public class SpiDiscoveryTest extends AbstractTest
 {
+  /** Makes the embedded framework configuration specific to each test case. */
+  @Rule
+  public final TestName testName = new TestName();
+
+  @Override
+  protected Map<String, String> frameworkProperties()
+  {
+    String methodName = testName.getMethodName();
+    if ("consumerDoesNotDiscoverProviderWhenFrameworkServiceLoaderIsDisabled".
+        equals(methodName) ||
+        "metadataConsumerDiscoversMetadataProviderWhenFrameworkServiceLoaderIsDisabled".
+        equals(methodName))
+      {
+        return Map.of(MediatorConstants.FRAMEWORK_SERVICELOADER_PROPERTY,
+                      "disabled");
+      }
+    return Map.of();
+  }
+
   /**
    * Verifies that a consumer discovers a provider declared through
    * {@code META-INF/services}, even though neither Bundle declares OSGi
@@ -111,4 +136,51 @@ public class SpiDiscoveryTest extends AbstractTest
     provider.stop();
   }
 
+  /**
+   * Verifies that a metadata consumer discovers a metadata provider when
+   * framework ServiceLoader mediation is disabled.
+   */
+  @Test
+  public void metadataConsumerDiscoversMetadataProviderWhenFrameworkServiceLoaderIsDisabled()
+    throws Exception
+  {
+    Bundle provider = install(BUNDLE_PROVIDER_METADATA);
+    Bundle consumer = install(BUNDLE_CONSUMER_METADATA);
+
+    provider.start();
+    assertNotNull(awaitService(SPIProvider.class.getName(), true));
+    int outputOffset = outputLength();
+    consumer.start();
+
+    awaitOutputContainsAfter(outputOffset,
+                             "[consumer] Get all the registered services:/",
+                             REGULAR_PROVIDER_MESSAGE);
+
+    consumer.stop();
+    provider.stop();
+  }
+
+  /**
+   * Verifies that a consumer cannot discover an SPI provider when framework
+   * ServiceLoader mediation is disabled.
+   */
+  @Test
+  public void consumerDoesNotDiscoverProviderWhenFrameworkServiceLoaderIsDisabled()
+    throws Exception
+  {
+    Bundle provider = install(BUNDLE_PROVIDER);
+    Bundle consumer = install(BUNDLE_CONSUMER);
+
+    provider.start();
+    assertNull(awaitService(SPIProvider.class.getName(), false));
+    int outputOffset = outputLength();
+    consumer.start();
+
+    awaitOutputContainsAfter(outputOffset,
+                             "[consumer] No SPI provider found.");
+    assertOutputDoesNotContain(FRAGMENT_PROVIDER_MESSAGE);
+
+    consumer.stop();
+    provider.stop();
+  }
 }

@@ -8,32 +8,42 @@ package com.aicas.osgi.spi.proxy.internal;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.util.Textifier;
 import org.objectweb.asm.util.TraceClassVisitor;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.hooks.weaving.WeavingException;
 import org.osgi.framework.hooks.weaving.WeavingHook;
 import org.osgi.framework.hooks.weaving.WovenClass;
+import org.osgi.framework.wiring.BundleWiring;
 
 import com.aicas.osgi.spi.weaver.ServiceLoaderWeaver;
+import com.aicas.osgi.spi.weaver.StaticWeavingStatus;
+import com.aicas.osgi.spi.weaver.WeaverConstants;
 
 public class ServiceLoaderWeavingHook implements WeavingHook
 {
+  /** Fixed metadata classification for a bundle wiring. */
+  private enum WiringAnalysis
+  {
+    SKIP,
+    PROCESSOR_REQUIRED,
+    METADATA_FREE
+  }
+
   private final MediatorActivator activator_;
   private final Bundle weaverBundle_;
-  private static final String MEDIATOR_PACKAGE =
-      com.aicas.osgi.spi.proxy.ServiceLoader.class.getPackage().getName();
 
-  private static final List<String>
-  INFRASTRUCTURE_BUNDLE_PREFIXES = List.of("org.objectweb.asm",
-                                           "biz.aQute.tester",
-                                           "junit-platform-",
-                                           "junit-jupiter-",
-                                           "org.opentest4j",
-                                           "assertj-core",
-                                           "net.bytebuddy");
+  /**
+   * Fixed wiring analyses, held by strong references for this hook's lifetime.
+   * Consumer registration and metadata permissions are checked on each load.
+   */
+  private final ConcurrentMap<BundleWiring, WiringAnalysis> wiringAnalyses_ =
+      new ConcurrentHashMap<>();
 
   ServiceLoaderWeavingHook(MediatorActivator act)
   {
@@ -41,26 +51,17 @@ public class ServiceLoaderWeavingHook implements WeavingHook
     // Resolve this before registering the hook. Resolving the weaver bundle
     // from weave() can otherwise trigger a class-loading cycle.
     weaverBundle_ = FrameworkUtil.getBundle(ServiceLoaderWeaver.class);
+    // Loading the analysis enum from weave() would also re-enter this hook.
+    WiringAnalysis.values();
   }
 
   @Override
   public void weave(WovenClass wovenClass)
   {
-    Bundle consumerBundle = wovenClass.getBundleWiring().getBundle();
-
-    if (isInfrastructureBundle(consumerBundle))
+    if (!shouldWeave(wovenClass))
       {
         return;
       }
-
-    //  Don't process the class if it's bundle defines processor
-    //  extender but is not wired to this mediator.
-    if (HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) &&
-        !activator_.requiresProcessing(consumerBundle))
-      {
-        return;
-      }
-
     byte[] originalBytes = wovenClass.getBytes();
     ServiceLoaderWeaver.WeavingResult result =
         ServiceLoaderWeaver.weave(originalBytes);
@@ -78,9 +79,9 @@ public class ServiceLoaderWeavingHook implements WeavingHook
     // Add the package visibility before publishing the transformed bytes.
     List<String> dynamicImports = wovenClass.getDynamicImports();
 
-    if (!dynamicImports.contains(MEDIATOR_PACKAGE))
+    if (!dynamicImports.contains(WeaverConstants.PROXY_PACKAGE))
       {
-        dynamicImports.add(MEDIATOR_PACKAGE);
+        dynamicImports.add(WeaverConstants.PROXY_PACKAGE);
       }
 
     wovenClass.setBytes(wovenBytes);
@@ -89,26 +90,98 @@ public class ServiceLoaderWeavingHook implements WeavingHook
   }
 
   /**
-   * Returns whether this is a framework bundle which must not be transformed.
+   * Determines whether the mediator should attempt to weave this class.
    *
-   * <p>The hook must not weave its own mediator bundle: doing so requires
-   * loading mediator classes while their definitions are being transformed.
-   * The weaver and system bundles are similarly framework infrastructure,
-   * rather than Service Loader consumers.</p>
+   * <ul>
+   *   <li>Statically processed wirings are excluded.</li>
+   *   <li>Infrastructure bundles are excluded.</li>
+   *   <li>Bundles whose metadata the mediator cannot currently read are excluded.</li>
+   *   <li>A bundle that selects another mediator is excluded.</li>
+   *   <li>An otherwise eligible consumer selected by this mediator is processed.</li>
+   *   <li>A metadata-free consumer is processed only when framework-level
+   *       ServiceLoader support is enabled.</li>
+   * </ul>
+   *
+   * <p>Caches whether the bundle should always be skipped and whether it
+   * declares a processor requirement. These properties remain fixed for
+   * the same wiring.</p>
+   *
+   * <p>Does not cache metadata permissions or consumer registration status,
+   * because they can change without a new wiring. Invalid static processing
+   * headers throw an exception and are not cached.</p>
+   *
+   * @param wovenClass the class being considered by the weaving hook.
+   * @return {@code true} when the mediator should attempt to weave the class.
+   * @throws WeavingException if analysis encounters an invalid static processing
+   *         header value.
    */
-  private boolean isInfrastructureBundle(Bundle bundle)
+  private boolean shouldWeave(WovenClass wovenClass)
   {
-    if (bundle == null ||
-        bundle.getBundleId() == 0 ||
-        bundle.equals(activator_.getMediatorBundle()) ||
-        bundle.equals(weaverBundle_))
+    BundleWiring wiring = wovenClass.getBundleWiring();
+    Bundle consumerBundle = wiring.getBundle();
+    WiringAnalysis analysis = wiringAnalyses_.get(wiring);
+    if (analysis == null &&
+        (consumerBundle == null ||
+         consumerBundle.getBundleId() == 0 ||
+         consumerBundle.equals(activator_.getMediatorBundle()) ||
+         consumerBundle.equals(weaverBundle_) ||
+         WeaverConstants.isInfrastructureBundle(consumerBundle.getSymbolicName())))
       {
-        return true;
+        wiringAnalyses_.put(wiring, WiringAnalysis.SKIP);
+        return false;
       }
+    if (analysis == WiringAnalysis.SKIP ||
+        !MediatorSecurity.canReadMetadata(activator_.getMediatorBundle(),
+                                         consumerBundle))
+      {
+        return false;
+      }
+    if (analysis == null)
+      {
+        if (isStaticallyProcessed(consumerBundle))
+          {
+            analysis = WiringAnalysis.SKIP;
+          }
+        else
+          {
+            analysis = HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) ?
+                       WiringAnalysis.PROCESSOR_REQUIRED : WiringAnalysis.METADATA_FREE;
+          }
+        wiringAnalyses_.put(wiring, analysis);
+      }
+    if (analysis == WiringAnalysis.SKIP)
+      {
+        return false;
+      }
+    return activator_.isMetadataConsumer(consumerBundle) ||
+           (analysis == WiringAnalysis.METADATA_FREE &&
+            activator_.isFrameworkServiceLoaderEnabled());
+  }
 
-    String symbolicName = bundle.getSymbolicName();
-    return symbolicName != null &&
-           INFRASTRUCTURE_BUNDLE_PREFIXES.stream().anyMatch(symbolicName::startsWith);
+  /**
+   * Checks the bundle's static processing header.
+   *
+   * @param bundle bundle whose headers are checked.
+   * @return {@code true} if the status is valid; {@code false} if absent.
+   * @throws WeavingException if the header is present with an invalid value.
+   */
+  private boolean isStaticallyProcessed(Bundle bundle)
+  {
+    String value = bundle.getHeaders().get(WeaverConstants.STATIC_WEAVING_HEADER);
+    if (value == null)
+      {
+        return false;
+      }
+    if (!StaticWeavingStatus.isValid(value))
+      {
+        throw new WeavingException("Invalid " +
+                                   WeaverConstants.STATIC_WEAVING_HEADER +
+                                   " value '" + value + "' in bundle " +
+                                   bundle.getSymbolicName() +
+                                   " [" + bundle.getBundleId() +
+                                   "].");
+      }
+    return true;
   }
 
   /**

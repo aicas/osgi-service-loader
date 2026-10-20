@@ -14,6 +14,7 @@ import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
 import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
 import org.osgi.service.log.Logger;
 
 /**
@@ -36,9 +37,15 @@ public class ProviderBundleLifecycleManagerTest
   @Before
   public void createLifecycleManager()
   {
+    ActiveMediatorTestFixture mediator = ActiveMediatorTestFixture.create();
+    BundleContext context = mediator.context();
+    org.mockito.Mockito.when(context.getProperty(MediatorConstants.PROVIDER_STOP_DELAY_MILLIS_PROPERTY)).
+                                     thenReturn(Long.toString(PROVIDER_STOP_DELAY_MILLIS_TEST));
     lifecycleManager_ =
-            new ProviderBundleLifecycleManager(PROVIDER_STOP_DELAY_MILLIS_TEST,
-                                               () -> mock(Logger.class), ignored ->{});
+            new ProviderBundleLifecycleManager(context,
+                                               true,
+                                               () -> mock(Logger.class),
+                                               ignored ->{});
   }
 
   @After

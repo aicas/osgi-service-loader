@@ -11,7 +11,9 @@ import static org.junit.Assert.assertNull;
 
 import java.util.Map;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TestName;
 import org.osgi.framework.Bundle;
 
 import com.aicas.osgi.spi.example.spi.SPIProvider;
@@ -26,9 +28,27 @@ public class ProviderLifecycleTest extends AbstractTest
   /** Allows the delayed-stop scheduler time to run after its configured delay. */
   private static final long PROVIDER_STOP_DELAY_TOLERANCE_MILLIS = 50;
 
+  /** Makes the embedded framework configuration specific to each test case. */
+  @Rule
+  public final TestName testName = new TestName();
+
   @Override
   protected Map<String, String> frameworkProperties()
   {
+    if ("doesNotStartProviderWhenStartOnDemandIsDisabled".equals(testName.getMethodName()))
+      {
+        return Map.of(MediatorConstants.PROVIDER_STOP_DELAY_MILLIS_PROPERTY,
+                      Long.toString(PROVIDER_STOP_DELAY_MILLIS),
+                      MediatorConstants.PROVIDER_START_ON_DEMAND_PROPERTY,
+                      "disabled");
+      }
+    if ("doesNotStopProviderWhenStopOnDemandIsDisabled".equals(testName.getMethodName()))
+      {
+        return Map.of(MediatorConstants.PROVIDER_STOP_DELAY_MILLIS_PROPERTY,
+                      Long.toString(PROVIDER_STOP_DELAY_MILLIS),
+                      MediatorConstants.PROVIDER_STOP_ON_DEMAND_PROPERTY,
+                      "disabled");
+      }
     return Map.of(MediatorConstants.PROVIDER_STOP_DELAY_MILLIS_PROPERTY,
                   Long.toString(PROVIDER_STOP_DELAY_MILLIS));
   }
@@ -41,7 +61,7 @@ public class ProviderLifecycleTest extends AbstractTest
    * fragment remains resolved because fragments are never started directly.</p>
    */
   @Test
-  public void startsResolvedStoppedProvidersOnDemand()
+  public void startsProvidersOnDemand()
     throws Exception
   {
     Bundle provider = install(BUNDLE_PROVIDER_METADATA);
@@ -96,10 +116,64 @@ public class ProviderLifecycleTest extends AbstractTest
                  Bundle.ACTIVE, provider.getState());
 
     Thread.sleep(PROVIDER_STOP_DELAY_TOLERANCE_MILLIS);
-    awaitBundleState(provider, Bundle.RESOLVED,
+    awaitBundleState(provider,
+                     Bundle.RESOLVED,
                      PROVIDER_STOP_DELAY_TOLERANCE_MILLIS);
 
     assertNull(awaitService(SPIProvider.class.getName(), false));
     assertOutputContains("[consumer] stopped");
+  }
+
+  /**
+   * Verifies that a resolved provider host remains stopped when on-demand
+   * startup is disabled.
+   */
+  @Test
+  public void doesNotStartProviderWhenStartOnDemandIsDisabled()
+    throws Exception
+  {
+    Bundle provider = install(BUNDLE_PROVIDER_METADATA);
+    Bundle consumer = install(BUNDLE_CONSUMER);
+
+    resolveBundles(provider);
+    assertEquals(Bundle.RESOLVED, provider.getState());
+
+    consumer.start();
+
+    awaitOutputContains("[consumer] No SPI provider found.");
+    assertEquals(Bundle.ACTIVE, consumer.getState());
+    assertEquals(Bundle.RESOLVED, provider.getState());
+    assertNull(awaitService(SPIProvider.class.getName(), false));
+    assertOutputDoesNotContain(REGULAR_PROVIDER_MESSAGE);
+
+    consumer.stop();
+
+    assertOutputContains("[consumer] stopped");
+  }
+
+  /**
+   * Verifies that an idle provider remains active when on-demand stopping is
+   * disabled.
+   */
+  @Test
+  public void doesNotStopProviderWhenStopOnDemandIsDisabled()
+    throws Exception
+  {
+    Bundle provider = install(BUNDLE_PROVIDER_METADATA);
+    Bundle consumer = install(BUNDLE_CONSUMER);
+
+    provider.start();
+    consumer.start();
+    awaitOutputContains(REGULAR_PROVIDER_MESSAGE);
+    assertEquals(Bundle.ACTIVE, provider.getState());
+
+    consumer.stop();
+    Thread.sleep(PROVIDER_STOP_DELAY_MILLIS * 2);
+    assertEquals(Bundle.ACTIVE, provider.getState());
+
+    assertOutputContains("[consumer] stopped");
+    provider.stop();
+
+    assertNull(awaitService(SPIProvider.class.getName(), false));
   }
 }

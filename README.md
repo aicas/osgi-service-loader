@@ -87,6 +87,24 @@ start <mediator-bundle-id>
 The mediator exposes the `osgi.serviceloader.processor` and
 `osgi.serviceloader.registrar` extender capabilities.
 
+## Security
+
+When a `SecurityManager` is present, the mediator checks permissions before
+performing cross-bundle operations. A denied permission prevents that operation
+and the associated provider is not exposed through mediation.
+
+The mediator needs `AdminPermission` for the bundles it processes:
+
+```text
+AdminPermission[<consumer and provider bundles>,METADATA]
+AdminPermission[<provider bundles>,CLASS|CONTEXT]
+AdminPermission[<provider bundles>,EXECUTE]  # when on-demand start/stop is used
+```
+
+Consumers need `ServicePermission[<service type>,GET]`. Providers need
+`ServicePermission[<service type>,REGISTER]` when the mediator delivers a
+provider or registers it as an OSGi service.
+
 ## Provider and consumer modes
 
 The mediator evaluates a host bundle and its attached fragments together.
@@ -141,6 +159,52 @@ java.util.ServiceLoader.load(service, loader)
 `java.util.ServiceLoader`; `Consumer.class` lets the proxy `ServiceLoader`
 identify that class's OSGi bundle.
 
+## Static weaving
+
+Packaging `serviceloader-weaver` also creates an executable
+`serviceloader-weaver-<version>-jar-with-dependencies.jar`. Use it to weave a
+OSGi bundle before installation:
+
+```text
+java -jar serviceloader-weaver-<version>-jar-with-dependencies.jar input.jar [output-directory]
+```
+
+The weaver does not verify JAR signatures, including those in embedded JARs.
+Weaving may invalidate existing signatures retained in the generated JAR.
+Remove any existing signature metadata and sign the generated JAR before
+installation.
+
+The first argument is the input JAR. The optional second argument is an
+existing output directory, specified as an absolute path or a path relative
+to the current directory. If omitted, the output is written to the current
+directory.
+
+The output filename replaces the input filename's extension with
+`-spi-consumer.jar`: for example, `bundle.jar` becomes
+`bundle-spi-consumer.jar`. An existing target file or symbolic link is warned
+about and deleted.
+
+Successful processing produces an output JAR with one of these manifest headers:
+
+- `Aicas-OSGi-Spi-Weaver: woven` when at least one class was woven.
+  An import for `com.aicas.osgi.spi.proxy` is added if absent.
+- `Aicas-OSGi-Spi-Weaver: scanned` when scanning completes without
+  transforming any class. Class and resource contents remain unchanged.
+
+Both values cause the runtime weaving hook to skip the bundle. Values must
+match exactly: uppercase forms, empty values, and surrounding whitespace are
+invalid. A missing header allows normal processing. An invalid value causes
+the offline tool to report an exception; the runtime hook throws a
+`WeavingException`, failing the current class load without disabling the hook.
+
+If an exception occurs while reading, scanning, or transforming classes, processing stops
+immediately, no new output JAR is published, and the exception is reported.
+
+All class entries in the outer archive are scanned. Embedded JARs are scanned
+only when named by `Bundle-ClassPath`; deeper embedded JARs are not processed
+recursively. Input JARs already carrying a valid `Aicas-OSGi-Spi-Weaver`
+status are skipped without producing output.
+
 ## Proxy ServiceLoader
 
 `com.aicas.osgi.spi.proxy.ServiceLoader` replaces the JDK type inside a woven
@@ -154,7 +218,7 @@ provider implementation through the provider bundle's class loader.
 When mediation is enabled, `iterator()` returns providers in this order:
 
 1. Visible mediator providers that already have cached instances.
-2. Remaining visible mediator providers.
+2. Remaining visible mediator providers; successfully created instances are cached.
 3. Providers from the Java ServiceLoader delegate.
 
 This combined iterator suppresses duplicate provider classes across the mediator
@@ -166,23 +230,16 @@ warning and skips it so iteration can continue with the next mediator provider.
 The failed entry is removed from the cache. Errors from the Java ServiceLoader
 delegate retain normal JDK behavior.
 
-Provider instances are cached per proxy loader. Before an iterator snapshot is
-built, cached definitions that are no longer visible in the mediator registry
-are removed.
+Mediator provider instances are cached per proxy loader. Each new iterator reads
+the current mediator registry and builds a fresh snapshot of the providers visible
+to the consumer. Later iterators can therefore discover newly registered providers
+and omit providers whose registrations have been removed. An existing iterator
+retains its original snapshot. Cached instances whose definitions are absent from
+a new snapshot are removed.
 
-`reload()` clears both the mediator-provider cache and the Java delegate cache.
+`reload()` clears both the mediator provider cache and the Java delegate cache.
 As with `java.util.ServiceLoader`, obtain a new iterator after calling
 `reload()`.
-
-A later `iterator()` call reads a fresh mediator-registry snapshot and reflects
-tracked provider installations, updates, removals, and fragment attachments.
-An existing iterator retains its original snapshot.
-
-When the proxy loads a selected mediator provider, it starts its resolved but
-stopped host bundle on demand. After the last dependent consumer leaves, the
-mediator can stop an idle host after a grace period. Set the framework property
-`com.aicas.osgi.spi.provider.stop.delay.millis` to a positive delay in
-milliseconds; the default is 50 seconds.
 
 For `load(Class)`, mediation uses the woven caller's OSGi bundle when it has
 one. For `load(Class, ClassLoader)`, mediation applies only when the requested
@@ -192,6 +249,20 @@ Java ServiceLoader discovery.
 When the mediator is unavailable or mediation is disabled for the loader, the
 proxy clears its mediator-provider cache and returns only Java-delegate
 providers.
+
+## Framework properties
+
+The mediator reads these properties when it starts.
+
+| Property | Default | Behavior |
+| --- | --- | --- |
+| `org.osgi.framework.serviceloader` | `enabled` | Enables framework-level ServiceLoader mediation for metadata-free consumers. When `disabled`, those consumers use ordinary Java ServiceLoader discovery; consumers using the `osgi.serviceloader.processor` extender continue to use standard OSGi Service Loader Mediator processing. |
+| `com.aicas.osgi.spi.provider.start.on.demand` | `enabled` | Starts a selected provider bundle when it is not already active or starting. When `disabled`, inactive provider bundles are not started automatically. |
+| `com.aicas.osgi.spi.provider.stop.on.demand` | `enabled` | Stops an idle provider after all its consumer leave. When `disabled`, the mediator does not stop idle provider bundles automatically. |
+| `com.aicas.osgi.spi.provider.stop.delay.millis` | `50000` | Sets the positive grace period, in milliseconds, before an idle provider host is stopped. Invalid or non-positive values use the default. This applies only when on-demand stopping is enabled. |
+
+The boolean properties accept case-insensitive `enabled` and `disabled` values.
+Missing or invalid values use their `enabled` default.
 
 ## Examples
 

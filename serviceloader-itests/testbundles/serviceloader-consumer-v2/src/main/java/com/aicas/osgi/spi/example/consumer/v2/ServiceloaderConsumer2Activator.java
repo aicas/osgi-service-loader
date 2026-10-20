@@ -18,9 +18,9 @@ public class ServiceloaderConsumer2Activator implements BundleActivator
   @Override
   public void start(BundleContext context)
   {
-    ServiceLoader.load(SPIProvider.class).findFirst().ifPresentOrElse(
-        provider -> System.out.println(provider.getMessage()),
-        () -> System.out.println("[consumerV2] No SPI 2.0 provider found."));
+    ServiceLoader.load(SPIProvider.class).findFirst().
+                  ifPresentOrElse(provider -> System.out.println(provider.getMessage()),
+                                  () -> System.out.println("[consumerV2] No SPI 2.0 provider found."));
   }
 
   @Override

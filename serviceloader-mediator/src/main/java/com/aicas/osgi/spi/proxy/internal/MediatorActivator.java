@@ -58,14 +58,34 @@ public class MediatorActivator implements BundleActivator
   private BundleTracker providerBundleTracker_;
   @SuppressWarnings("rawtypes")
   private ServiceRegistration weavingHookService_;
+
+  /**
+   * Metadata provider bundles that have been observed and registered by the
+   * mediator.
+   *
+   * Declared {@code osgi.serviceloader} provider capabilities, grouped by
+   * Service Type name and then provider bundle ID.
+   *
+   * <p>Each list retains every capability declared by one provider bundle for
+   * the Service Type. metadata consumers use this registry with their
+   * resolved requirements to select candidate providers.</p>
+   */
   private final ConcurrentMap<String, Map<Long, List<ProviderCapability>>>
     serviceLoaderCapabilities_ = new ConcurrentHashMap<>();
 
+  /**
+   * Provider configuration entries scanned from bundles, grouped by Service
+   * Type name and then provider bundle ID.
+   *
+   * <p>Each entry contains the provider implementation class names and its
+   * Service Type package capability. Both metadata-free and metadata
+   * consumers use this registry to select class-space-compatible providers.</p>
+   */
   private final ConcurrentMap<String, Map<Long, ProviderEntry>>
     serviceLoaderEntries_ = new ConcurrentHashMap<>();
 
   /**
-   * Visibility records for processed consumer bundles.
+   * Visibility records for processed metadata consumer bundles.
    *
    * <ul>
    *   <li>No entry means the bundle does not have processor extenders.</li>
@@ -82,7 +102,22 @@ public class MediatorActivator implements BundleActivator
   private final ConcurrentMap<Bundle, ConsumerVisibility> consumerRequirements_ =
       new ConcurrentHashMap<>();
 
+  private final ConcurrentMap<Bundle, ConcurrentMap<String, BundleCapability>>
+          consumerPackageCapabilityCache_ = new ConcurrentHashMap<>();
+
   private ProviderBundleLifecycleManager providerBundleLifecycleManager_;
+
+  /**
+   * Framework-level ServiceLoader support setting, fixed when the mediator
+   * starts. Chapter 133 mediation is independent of this setting.
+   */
+  private boolean frameworkServiceLoaderEnabled_;
+
+  /** Whether inactive providers may be started while preparing a provider. */
+  private boolean providerStartOnDemandEnabled_;
+
+  /** Whether an idle provider may be stopped after its grace period. */
+  private boolean providerStopOnDemandEnabled_;
 
   /*---------------------------- methods ------------------------------*/
   /**
@@ -103,10 +138,6 @@ public class MediatorActivator implements BundleActivator
   public synchronized void start(BundleContext context) throws Exception
   {
     bundleContext_ = context;
-    providerBundleLifecycleManager_ =
-        new ProviderBundleLifecycleManager(context,
-                                           () -> logger_,
-                                           MediatorActivator::printDebug);
     activator_ = this;
     loggerFactoryTracker_ = new ServiceTracker<>(context, LoggerFactory.class,
         new ServiceTrackerCustomizer<LoggerFactory, LoggerFactory>()
@@ -145,6 +176,27 @@ public class MediatorActivator implements BundleActivator
           }
         });
     loggerFactoryTracker_.open();
+
+    frameworkServiceLoaderEnabled_ =
+        booleanProperty(context,
+                        MediatorConstants.FRAMEWORK_SERVICELOADER_PROPERTY,
+                        true);
+
+    providerStartOnDemandEnabled_ =
+        booleanProperty(context,
+                        MediatorConstants.PROVIDER_START_ON_DEMAND_PROPERTY,
+                        true);
+
+    providerStopOnDemandEnabled_ =
+        booleanProperty(context,
+                        MediatorConstants.PROVIDER_STOP_ON_DEMAND_PROPERTY,
+                        true);
+
+    providerBundleLifecycleManager_ =
+        new ProviderBundleLifecycleManager(context,
+                                           providerStopOnDemandEnabled_,
+                                           () -> logger_,
+                                           MediatorActivator::printDebug);
 
     WeavingHook wh = new ServiceLoaderWeavingHook(this);
     weavingHookService_ = context.registerService(WeavingHook.class.getName(),
@@ -224,9 +276,53 @@ public class MediatorActivator implements BundleActivator
       }
   }
 
+  /**
+   * Returns whether framework-level ServiceLoader support is enabled.
+   */
+  public boolean isFrameworkServiceLoaderEnabled()
+  {
+    return frameworkServiceLoaderEnabled_;
+  }
+
+  /**
+   * Returns whether an inactive provider may be started on demand.
+   */
+  public boolean isProviderStartOnDemandEnabled()
+  {
+    return providerStartOnDemandEnabled_;
+  }
+
+  /**
+   * Reads an enabled-or-disabled mediator property. Missing and invalid values
+   * use the supplied default.
+   */
+  private static boolean booleanProperty(BundleContext context,
+                                         String property,
+                                         boolean defaultValue)
+  {
+    String value = context.getProperty(property);
+    if (value == null)
+      {
+        return defaultValue;
+      }
+    if ("enabled".equalsIgnoreCase(value))
+      {
+        return true;
+      }
+    if ("disabled".equalsIgnoreCase(value))
+      {
+        return false;
+      }
+    logger_.warn("Invalid value '" + value + "' for " + property
+                 + "; using the default value '"
+                 + (defaultValue ? "enabled" : "disabled") + "'.");
+    return defaultValue;
+  }
+
   public void unregisterConsumerBundle(Bundle bundle)
   {
     consumerRequirements_.remove(bundle);
+    consumerPackageCapabilityCache_.remove(bundle);
     providerBundleLifecycleManager_.removeConsumer(bundle);
   }
 
@@ -248,7 +344,7 @@ public class MediatorActivator implements BundleActivator
   /**
    * Returns {@code true} if this bundle require ServiceLoader processing.
    */
-  public boolean requiresProcessing(Bundle bundle)
+  public boolean isMetadataConsumer(Bundle bundle)
   {
     return consumerRequirements_.containsKey(bundle);
   }
@@ -350,7 +446,8 @@ public class MediatorActivator implements BundleActivator
                      " for service type " + serviceType);
         }
     });
-    serviceLoaderEntries_.forEach((serviceType, entriesByBundle) -> {
+    serviceLoaderEntries_.forEach((serviceType, entriesByBundle) ->
+    {
       if (entriesByBundle.remove(bundleId) != null)
         {
           result.set(true);
@@ -364,6 +461,7 @@ public class MediatorActivator implements BundleActivator
     providerBundleLifecycleManager_.removeProvider(bundle);
     return result.get();
   }
+
 
   public void getProviders(String serviceType,
                            Bundle consumerBundle,
@@ -419,26 +517,136 @@ public class MediatorActivator implements BundleActivator
                            result);
   }
 
-  private static void addCompatibleProviders(Map<Long, ProviderEntry> entries,
-                                             Set<Long> candidateBundleIds,
-                                             String serviceType,
-                                             Bundle consumerBundle,
-                                             Map<Long, Set<String>> result)
+  /**
+   * Adds candidate providers whose Service Type package source matches the
+   * consumer's resolved package capability.
+   *
+   * @param entries provider definitions grouped by provider bundle ID.
+   * @param candidateBundleIds provider bundle IDs eligible for this consumer.
+   * @param serviceType the fully qualified Service Type name.
+   * @param consumerBundle the bundle requesting providers.
+   * @param result destination for matching provider implementation names,
+   *               keyed by provider bundle ID.
+   */
+  private void addCompatibleProviders(Map<Long, ProviderEntry> entries,
+                                      Set<Long> candidateBundleIds,
+                                      String serviceType,
+                                      Bundle consumerBundle,
+                                      Map<Long, Set<String>> result)
   {
-    String packageName = ProviderEntry.packageOf(serviceType);
-    BundleCapability consumerPackageCapability =
-      ProviderEntry.packageCapability(consumerBundle, packageName);
+    String packageName = PackageWiringUtil.packageOf(serviceType);
+
+    // Providers of {@code java.*} Service Types are accepted without an OSGi
+    // package-wire comparison because the JVM bootstrap loader supplies those
+    // packages.
+    if (packageName.startsWith(PackageWiringUtil.JAVA_PACKAGE_PREFIX))
+      {
+        for (Long bundleId : candidateBundleIds)
+          {
+            ProviderEntry entry = entries.get(bundleId);
+            if (entry != null)
+              {
+                result.put(bundleId, entry.implementationClasses());
+              }
+          }
+        return;
+      }
+
+    ConcurrentMap<String, BundleCapability> pkgCapabilities =
+      consumerPackageCapabilityCache_.computeIfAbsent(consumerBundle,
+                                                      ignored -> new ConcurrentHashMap<>());
+    BundleCapability consumerPkgCapability = pkgCapabilities.get(packageName);
+    if (consumerPkgCapability == null)
+      {
+        consumerPkgCapability =
+          PackageWiringUtil.effectivePackageCapability(consumerBundle,
+                                                       packageName);
+        if (consumerPkgCapability != null &&
+            consumerPackageCapabilityCache_.get(consumerBundle) == pkgCapabilities)
+          {
+            pkgCapabilities.putIfAbsent(packageName,
+                                        consumerPkgCapability);
+          }
+      }
 
     for (Long bundleId : candidateBundleIds)
       {
         ProviderEntry entry = entries.get(bundleId);
         if (entry != null &&
-            ProviderEntry.sameCapability(entry.packageCapability(),
-                                         consumerPackageCapability))
+            PackageWiringUtil.sameCapability(resolveProviderPackageCapability(entry),
+                                             consumerPkgCapability))
           {
             result.put(bundleId, entry.implementationClasses());
           }
       }
+  }
+
+  /**
+   * Returns a Provider's Service Type package capability, resolving a
+   * deferred dynamic import when necessary.
+   *
+   * <p>Provider metadata is scanned while a Bundle is merely resolved, so a
+   * Provider that uses {@code DynamicImport-Package} may not have established
+   * its Service Type package wire yet. Loading the Service Type through the
+   * Provider Bundle's class loader lets the framework establish that wire. The
+   * capability is then reread and compared with the Consumer's capability.</p>
+   */
+  private BundleCapability resolveProviderPackageCapability(ProviderEntry entry)
+  {
+    BundleCapability capability = entry.packageCapability();
+    if (capability != null)
+      {
+        return capability;
+      }
+
+    if (!MediatorSecurity.canLoadClasses(getMediatorBundle(),
+                                         entry.providerBundle()))
+      {
+        return null;
+      }
+    // Load the Service Type class to trigger a dynamic import, if necessary.
+    try
+      {
+        entry.providerBundle().loadClass(entry.serviceType());
+      }
+    catch (ClassNotFoundException | LinkageError |
+           SecurityException | IllegalStateException e)
+      {
+        return null;
+      }
+    // Reread the package capability after the dynamic import is triggered.
+    capability = PackageWiringUtil.effectivePackageCapability(entry.providerBundle(),
+                                                              PackageWiringUtil.packageOf(entry.serviceType()));
+    // Cache the capability for future lookups, but only if the entry is still
+    // the one registered for this provider bundle. This prevents an old entry
+    // from overwriting a new entry installed after an update or refresh.
+    if (capability != null)
+      {
+        cacheProviderPackageCapability(entry, capability);
+      }
+    return capability;
+  }
+
+  /**
+   * Retains a package capability established by a Provider dynamic import.
+   *
+   * <p>Only the entry originally resolved for this lookup may be replaced.
+   * This prevents an old Bundle revision from overwriting an entry installed
+   * after an update or refresh.</p>
+   */
+  private void cacheProviderPackageCapability(ProviderEntry entry,
+                                              BundleCapability capability)
+  {
+    serviceLoaderEntries_.compute(entry.serviceType(),(ignored, entries) ->
+          {
+            if (entries != null &&
+                entries.get(entry.providerBundle().getBundleId()) == entry)
+              {
+                entries.put(entry.providerBundle().getBundleId(),
+                            entry.withResolvedPackageCapability(capability));
+              }
+            return entries;
+          });
   }
 
   public Bundle getBundle(long bundleId)
@@ -446,9 +654,9 @@ public class MediatorActivator implements BundleActivator
     return bundleContext_.getBundle(bundleId);
   }
 
-  Bundle getMediatorBundle()
+  public Bundle getMediatorBundle()
   {
-    return bundleContext_ == null ? null : bundleContext_.getBundle();
+    return bundleContext_.getBundle();
   }
 
   // for internal debug.

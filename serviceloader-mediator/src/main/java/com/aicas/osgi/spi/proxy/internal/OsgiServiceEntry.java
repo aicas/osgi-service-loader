@@ -89,6 +89,12 @@ final class OsgiServiceEntry
                                                     Bundle spiBundle,
                                                     Hashtable<String, Object> properties)
     {
+
+      if (!MediatorSecurity.canAccessContext(spiBundle, bundle) ||
+          !MediatorSecurity.canLoadClasses(spiBundle, bundle))
+        {
+          return null;
+        }
       BundleContext context = bundle.getBundleContext();
       if (context == null)
         {
@@ -103,14 +109,17 @@ final class OsgiServiceEntry
           registrationProperties.put(MediatorConstants.SERVICELOADER_MEDIATOR_PROPERTY,
                                      spiBundle.getBundleId());
 
-          if (System.getSecurityManager() != null &&
-              !bundle.hasPermission(new ServicePermission(serviceType_,
-                                                          ServicePermission.REGISTER)))
+          if (!MediatorSecurity.hasServicePermission(bundle,
+                                                     serviceType_,
+                                                     ServicePermission.REGISTER))
             {
-              MediatorActivator.logger_.warn("Does not have the permission to register services of type: " +
+              MediatorActivator.logger_.warn(bundle.getSymbolicName() +
+                                             " does not have the permission to " +
+                                             "register services of type: " +
                                              serviceType_);
               return null;
             }
+
           ServiceRegistration registration = context.registerService(serviceType_,
                                                                      instance,
                                                                      registrationProperties);
@@ -154,6 +163,8 @@ final class OsgiServiceEntry
   private final List<ProviderCapability> provideCapabilities_;
 
   private List<ServiceRegistrationInfo> serviceRegistrationInfos_;
+
+  /*------------------------  constructors  ---------------------------*/
 
   OsgiServiceEntry(Map<String, Set<String>> impByType,
                    List<ProviderCapability> provideCapabilities)
