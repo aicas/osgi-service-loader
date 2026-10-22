@@ -27,11 +27,16 @@ import com.aicas.osgi.spi.weaver.WeaverConstants;
 
 public class ServiceLoaderWeavingHook implements WeavingHook
 {
-  /** Fixed metadata classification for a bundle wiring. */
+  /** Cached weaving decision for a bundle wiring. */
   private enum WiringAnalysis
   {
+    /** Do not weave classes from this wiring. */
     SKIP,
+
+    /** Weave only if the bundle's metadata selects this mediator. */
     PROCESSOR_REQUIRED,
+
+    /** Allow weaving without processor metadata when framework-level support is enabled. */
     METADATA_FREE
   }
 
@@ -39,8 +44,10 @@ public class ServiceLoaderWeavingHook implements WeavingHook
   private final Bundle weaverBundle_;
 
   /**
-   * Fixed wiring analyses, held by strong references for this hook's lifetime.
-   * Consumer registration and metadata permissions are checked on each load.
+   * Cached weaving decisions, held by strong references for this hook's lifetime.
+   * Eligible wirings still require permission and consumer-registration checks
+   * on each load. Analysis runs outside map callbacks to permit class loading
+   * to re-enter the hook safely.
    */
   private final ConcurrentMap<BundleWiring, WiringAnalysis> wiringAnalyses_ =
       new ConcurrentHashMap<>();
@@ -53,7 +60,15 @@ public class ServiceLoaderWeavingHook implements WeavingHook
     weaverBundle_ = FrameworkUtil.getBundle(ServiceLoaderWeaver.class);
     // Loading the analysis enum from weave() would also re-enter this hook.
     WiringAnalysis.values();
+    // These entries are available before any class enters the registered hook.
+    wiringAnalyses_.putIfAbsent(activator_.getBundle(0).adapt(BundleWiring.class),
+                                WiringAnalysis.SKIP);
+    wiringAnalyses_.putIfAbsent(activator_.getMediatorBundle().adapt(BundleWiring.class),
+                                WiringAnalysis.SKIP);
+    wiringAnalyses_.putIfAbsent(weaverBundle_.adapt(BundleWiring.class),
+                                WiringAnalysis.SKIP);
   }
+
 
   @Override
   public void weave(WovenClass wovenClass)
@@ -62,31 +77,29 @@ public class ServiceLoaderWeavingHook implements WeavingHook
       {
         return;
       }
+
     byte[] originalBytes = wovenClass.getBytes();
-    ServiceLoaderWeaver.WeavingResult result =
-        ServiceLoaderWeaver.weave(originalBytes);
+    ServiceLoaderWeaver.WeavingResult result = ServiceLoaderWeaver.weave(originalBytes);
 
     if (result.getStatus() != ServiceLoaderWeaver.WeavingResult.Status.WOVEN)
       {
-        MediatorActivator.logger_.debug( "ServiceLoader weaving did not transform " +
-            wovenClass.getClassName() + ": " + result.getStatus());
+        MediatorActivator.logger_.debug("ServiceLoader weaving did not transform " +
+                                         wovenClass.getClassName() + ": " +
+                                         result.getStatus());
         return;
       }
     byte[] wovenBytes = result.getBytes();
 
-    printClassBytecode(wovenClass);
-
-    // Add the package visibility before publishing the transformed bytes.
     List<String> dynamicImports = wovenClass.getDynamicImports();
 
-    if (!dynamicImports.contains(WeaverConstants.PROXY_PACKAGE))
+    if (!dynamicImports.contains(WeaverConstants.PROXY_IMPORT))
       {
-        dynamicImports.add(WeaverConstants.PROXY_PACKAGE);
+        dynamicImports.add(WeaverConstants.PROXY_IMPORT);
       }
-
     wovenClass.setBytes(wovenBytes);
 
-    printClassBytecode(wovenClass);
+    printClassBytecode(originalBytes);
+    printClassBytecode(wovenBytes);
   }
 
   /**
@@ -102,13 +115,15 @@ public class ServiceLoaderWeavingHook implements WeavingHook
    *       ServiceLoader support is enabled.</li>
    * </ul>
    *
-   * <p>Caches whether the bundle should always be skipped and whether it
-   * declares a processor requirement. These properties remain fixed for
-   * the same wiring.</p>
+   * <p>Metadata classification is cached per wiring. Proxy import versions are
+   * not inspected: deployment must provide the matching mediator as the only
+   * proxy package exporter, and the mediator requires the exact weaver API
+   * version. Each transformed class receives the generated proxy import.</p>
    *
-   * <p>Does not cache metadata permissions or consumer registration status,
-   * because they can change without a new wiring. Invalid static processing
-   * headers throw an exception and are not cached.</p>
+   * <p>Cached exclusions return immediately. Metadata permissions and consumer
+   * registration status are checked on each eligible call because they can
+   * change without a new wiring. Permission denial and invalid static
+   * processing headers are not cached.</p>
    *
    * @param wovenClass the class being considered by the weaving hook.
    * @return {@code true} when the mediator should attempt to weave the class.
@@ -118,41 +133,52 @@ public class ServiceLoaderWeavingHook implements WeavingHook
   private boolean shouldWeave(WovenClass wovenClass)
   {
     BundleWiring wiring = wovenClass.getBundleWiring();
-    Bundle consumerBundle = wiring.getBundle();
     WiringAnalysis analysis = wiringAnalyses_.get(wiring);
-    if (analysis == null &&
-        (consumerBundle == null ||
-         consumerBundle.getBundleId() == 0 ||
-         consumerBundle.equals(activator_.getMediatorBundle()) ||
-         consumerBundle.equals(weaverBundle_) ||
-         WeaverConstants.isInfrastructureBundle(consumerBundle.getSymbolicName())))
-      {
-        wiringAnalyses_.put(wiring, WiringAnalysis.SKIP);
-        return false;
-      }
-    if (analysis == WiringAnalysis.SKIP ||
-        !MediatorSecurity.canReadMetadata(activator_.getMediatorBundle(),
-                                         consumerBundle))
-      {
-        return false;
-      }
-    if (analysis == null)
-      {
-        if (isStaticallyProcessed(consumerBundle))
-          {
-            analysis = WiringAnalysis.SKIP;
-          }
-        else
-          {
-            analysis = HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) ?
-                       WiringAnalysis.PROCESSOR_REQUIRED : WiringAnalysis.METADATA_FREE;
-          }
-        wiringAnalyses_.put(wiring, analysis);
-      }
     if (analysis == WiringAnalysis.SKIP)
       {
         return false;
       }
+
+    Bundle consumerBundle = wiring.getBundle();
+    if (consumerBundle == null)
+      {
+        return false;
+      }
+
+    if (analysis == null &&
+        (consumerBundle.getBundleId() == 0 ||
+         consumerBundle.equals(activator_.getMediatorBundle()) ||
+         consumerBundle.equals(weaverBundle_) ||
+         WeaverConstants.isInfrastructureBundle(consumerBundle.getSymbolicName())))
+      {
+        // Identity checks cover new wirings created after bundle refresh.
+        // Exclude the weaver before calling its infrastructure helper.
+        wiringAnalyses_.putIfAbsent(wiring, WiringAnalysis.SKIP);
+        return false;
+      }
+
+    if (!MediatorSecurity.canReadMetadata(activator_.getMediatorBundle(),
+                                          consumerBundle))
+    {// not cache the analysis.
+      return false;
+    }
+
+    if (analysis == null)
+      {
+        // Metadata access can load another class and re-enter this hook.
+        // Publish only the completed decision, outside any map callback.
+        analysis = isStaticallyProcessed(consumerBundle) ? WiringAnalysis.SKIP :
+            HeaderProcessor.hasProcessorExtenderRequirement(consumerBundle) ?
+                                          WiringAnalysis.PROCESSOR_REQUIRED :
+                                          WiringAnalysis.METADATA_FREE;
+        wiringAnalyses_.putIfAbsent(wiring, analysis);
+      }
+
+    if (analysis == WiringAnalysis.SKIP)
+      {
+        return false;
+      }
+
     return activator_.isMetadataConsumer(consumerBundle) ||
            (analysis == WiringAnalysis.METADATA_FREE &&
             activator_.isFrameworkServiceLoaderEnabled());
@@ -181,15 +207,16 @@ public class ServiceLoaderWeavingHook implements WeavingHook
                                    " [" + bundle.getBundleId() +
                                    "].");
       }
+    MediatorActivator.logger_.debug("Skipping ServiceLoader weaving for woven bundle " +
+        bundle.getSymbolicName() + " [" + bundle.getBundleId() + "]");
     return true;
   }
 
   /**
-   * Renders the current class bytes for internal debugging.
+   * Renders a snapshot of class bytes for internal debugging.
    */
-  private void printClassBytecode(WovenClass wovenClass)
+  private void printClassBytecode(byte[] bytes)
   {
-    byte[] bytes = wovenClass.getBytes();
 
     Textifier textifier = new Textifier();
 

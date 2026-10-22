@@ -22,8 +22,12 @@ public interface WeaverConstants
   /** Package containing the ServiceLoader proxy used by woven classes. */
   String PROXY_PACKAGE = "com.aicas.osgi.spi.proxy";
 
+  /** Proxy API versions supported by generated calls. */
+  String PROXY_VERSION_RANGE =
+      "[" + ProxyVersion.VERSION + "," + ProxyVersion.NEXT_MAJOR_VERSION + ")";
+
   /** Proxy package import clause with the supported version range. */
-  String PROXY_IMPORT = PROXY_PACKAGE + ";version=\"[1.0,2)\"";
+  String PROXY_IMPORT = PROXY_PACKAGE + ";version=\"" + PROXY_VERSION_RANGE + "\"";
 
   /**
    * Manifest header recording completed static processing.
