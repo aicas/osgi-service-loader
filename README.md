@@ -18,7 +18,7 @@ also provides metadata-free discovery for existing bundles that use
 | `serviceloader-weaver` | ASM-based bytecode transformer that transforms supported `java.util.ServiceLoader` calls to the `ServiceLoader` proxy. |
 | `serviceloader-mediator` | OSGi bundle containing the activator, metadata trackers, provider registry, weaving-hook registration, and proxy `ServiceLoader`. |
 | `serviceloader-itests` | Integration tests that start an embedded Felix framework. |
-| `serviceloader-realworld-itests` |Bnd/Felix compatibility tests for third-party APIs and providers, including JAXB, JSON, Mail, Validation, REST, Persistence, and WebSocket. |
+| `serviceloader-realworld-itests` | Bnd compatibility tests on Felix and Equinox for third-party APIs and providers, including JAXB, JSON, Mail, Validation, REST, Persistence, and WebSocket. |
 | `example` | Example SPI, consumer, provider, fragment, module-info and OSGi-service-registry bundles. |
 
 
@@ -50,13 +50,13 @@ Run the integration suite:
 mvn -pl serviceloader-itests -am verify
 ```
 
-Run the real-world compatibility suite:
+Run the real-world compatibility suite on both Felix and Equinox:
 
 ```sh
 mvn -pl serviceloader-realworld-itests -am verify
 ```
 
-Both integration suites build their required modules and start Felix
+Both integration suites build their required modules and start their frameworks
 automatically; no separately installed OSGi runtime is needed for testing.
 
 ## Install in an OSGi framework

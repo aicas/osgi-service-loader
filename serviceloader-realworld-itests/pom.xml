@@ -121,6 +121,12 @@
       <scope>runtime</scope>
     </dependency>
     <dependency>
+      <groupId>org.eclipse.platform</groupId>
+      <artifactId>org.eclipse.osgi</artifactId>
+      <version>3.23.0</version>
+      <scope>runtime</scope>
+    </dependency>
+    <dependency>
       <groupId>biz.aQute.bnd</groupId>
       <artifactId>biz.aQute.tester.junit-platform</artifactId>
       <version>${bnd.version}</version>
@@ -386,6 +392,7 @@
             <configuration>
               <bndruns>
                 <bndrun>test-felix.bndrun</bndrun>
+                <bndrun>test-equinox.bndrun</bndrun>
               </bndruns>
               <resolve>true</resolve>
               <failOnChanges>false</failOnChanges>
